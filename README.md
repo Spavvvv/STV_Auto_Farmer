@@ -14,7 +14,7 @@ Script Tampermonkey giúp tự động hóa việc đọc truyện, điểm danh
 
 ### Bước 1: Cài đặt môi trường
 1. Cài đặt tiện ích **Tampermonkey** trên trình duyệt (Chrome, Edge, Firefox...).
-2. [Bấm vào đây để cài đặt Script](LINK_RAW_FILE_CỦA_BẠN_Ở_ĐÂY) (Sau khi push lên GitHub, bạn bấm vào file .user.js -> bấm nút **Raw** để lấy link này).
+2. [Bấm vào đây để cài đặt Script](https://github.com/Spavvvv/STV_Auto_Farmer/raw/refs/heads/main/src/stv_farmer.user.js)
 
 ### Bước 2: Cấu hình Telegram (Bắt buộc để nhận thông báo)
 1. Mở Dashboard của Tampermonkey -> Chọn Script vừa cài -> Bấm Sửa (Edit).
