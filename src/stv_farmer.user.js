@@ -26,6 +26,14 @@
     };
     const win = unsafeWindow;
 
+    //Lấy truyện gốc từ URL(hotfix v1.1.1)
+    function getStoryRoot(url) {
+        // Tìm đoạn: https://sangtacviet.com/truyen/nguon/loai/id_truyen/
+        let match = url.match(/(https:\/\/sangtacviet\.com\/truyen\/[^\/]+\/\d+\/\d+)/);
+        if (match) return match[1] + '/';
+        return url; // Không khớp thì trả về nguyên bản
+    }
+
     // 2. QUẢN LÝ DỮ LIỆU & TRẠNG THÁI
     function getStoryList() { return JSON.parse(localStorage.getItem('stv_story_list') || '[]'); }
     function saveStoryList(list) { localStorage.setItem('stv_story_list', JSON.stringify(list)); }
@@ -100,94 +108,77 @@
         }, Math.random() * 2000);
     }
 
-    function processCommand(cmd) {
+    function processCommand(cmd) {          //hotfix v1.1.0
         console.log("Cmd:", cmd);
         let parts = cmd.split(' ');
         let command = parts[0].toLowerCase();
 
-        if (command === '/help') {
-            let msg = "<b>📜 MENU LỆNH:</b>\n" +
-                      "/status - Xem trạng thái\n/start - Bật Auto\n/stop - Tắt Auto\n/f5 - Reload\n" +
-                      "-- QUẢN LÝ --\n" +
-                      "/list - Xem danh sách\n" +
-                      "/add - Thêm truyện đang đọc\n" +
-                      "/add [link] - Thêm link cụ thể\n" +
-                      "/del [số] - Xóa\n" +
-                      "/swap [số] - Chuyển truyện\n" +
-                      "-- NGỦ --\n" +
-                      "/sleep [phút], /wake";
-            sendTele(msg, 'info');
+        // --- LỆNH ADD (SỬA: CẮT VỀ LINK GỐC TRƯỚC KHI LƯU) ---
+        if (command === '/add') {
+            let urlToAdd = parts[1];
+            // Nếu gõ /add trống -> Lấy link hiện tại
+            if (!urlToAdd) {
+                if (location.href.includes("sangtacviet.com/truyen/")) urlToAdd = location.href;
+                else { sendTele("❌ Bạn đang không ở trang đọc truyện.", 'error'); return; }
+            }
+
+            if (urlToAdd && urlToAdd.includes('sangtacviet.com')) {
+                let rootUrl = getStoryRoot(urlToAdd); // <--- QUAN TRỌNG: Cắt về gốc
+                if (addStory(rootUrl)) sendTele(`✅ Đã thêm Truyện:\n${rootUrl}`, 'info');
+                else sendTele("⚠️ Truyện đã có trong list.", 'info');
+            } else {
+                sendTele("❌ Link không hợp lệ.", 'error');
+            }
         }
-        else if (command === '/f5') location.reload();
-        else if (command === '/stop') { localStorage.setItem('stv_auto_farm', 'false'); sendTele("🛑 STOP", 'info', ()=>location.reload()); }
-        else if (command === '/start') { localStorage.setItem('stv_auto_farm', 'true'); sendTele("✅ START", 'info', ()=>location.reload()); }
         
-        // STATUS THÔNG MINH
+        // --- LỆNH STATUS (SỬA: SO SÁNH CHỨA LINK GỐC) ---
         else if (command === '/status') {
             let st = isAutoRunning() ? "ON 🟢" : "OFF 🔴";
             let list = getStoryList();
             let currentUrl = location.href;
             
-            // Check xem truyện hiện tại có trong list không
-            let listIndex = list.findIndex(u => currentUrl.includes(u) || u.includes(currentUrl));
-            let statusStr = "";
+            // Tìm xem link hiện tại có CHỨA link gốc nào trong list không
+            let listIndex = list.findIndex(rootLink => currentUrl.includes(rootLink));
             
+            let statusStr = "";
             if (list.length === 0) statusStr = "0/0 (List trống)";
-            else if (listIndex !== -1) statusStr = `${listIndex + 1}/${list.length}`;
+            else if (listIndex !== -1) {
+                statusStr = `${listIndex + 1}/${list.length}`;
+                setCurrentStoryIndex(listIndex); // Cập nhật lại vị trí cho chuẩn
+            }
             else statusStr = "Ngoại lai (Chưa lưu)";
 
             sendTele(`📊 <b>STATUS:</b> ${st}\nTruyện: ${statusStr}\nLỗi liên tiếp: ${getErrorStreak()}`, 'info');
         }
 
-        // ADD THÔNG MINH
-        else if (command === '/add') {
-            let urlToAdd = parts[1];
-            
-            // Nếu không có tham số -> Lấy URL hiện tại
-            if (!urlToAdd) {
-                if (location.href.includes("sangtacviet.com/truyen/")) {
-                    urlToAdd = location.href;
-                } else {
-                    sendTele("❌ Bạn đang không ở trang đọc truyện.", 'error');
-                    return;
-                }
-            }
-
-            if (urlToAdd && urlToAdd.includes('sangtacviet.com')) {
-                if (addStory(urlToAdd)) sendTele(`✅ Đã thêm:\n${urlToAdd}`, 'info');
-                else sendTele("⚠️ Truyện đã có trong list.", 'info');
-            } else sendTele("❌ Link không hợp lệ.", 'error');
-        }
-
+        // --- LỆNH LIST (SỬA: HIỂN THỊ MŨI TÊN ĐÚNG) ---
         else if (command === '/list') {
             let list = getStoryList();
             let currentUrl = location.href;
             let msg = "📋 <b>List Truyện:</b>\n";
-            list.forEach((l, i) => { 
-                // So sánh tương đối để hiện dấu mũi tên
-                let isCurrent = currentUrl.includes(l) || l.includes(currentUrl);
-                msg += `${isCurrent ? '👉 ' : ''}#${i + 1}: ${l}\n`; 
+            list.forEach((l, i) => {
+                // So sánh tương đối
+                let isCurrent = currentUrl.includes(l);
+                msg += `${isCurrent ? '👉 ' : ''}#${i + 1}: ${l}\n`;
             });
             if(list.length===0) msg += "(Trống)";
             sendTele(msg, 'info');
         }
-        else if (command === '/swap') {
-            let idx = parseInt(parts[1]) - 1;
-            swapToSpecificStory(idx);
+
+        // --- CÁC LỆNH KHÁC (GIỮ NGUYÊN) ---
+        else if (command === '/help') {
+            sendTele("📜 <b>MENU:</b>\n/status, /start, /stop, /f5\n/add [link], /list, /del [số], /swap [số]\n/sleep [phút], /wake", 'info');
         }
-        else if (command === '/del') {
-            let idx = parseInt(parts[1]) - 1;
-            if (removeStory(idx)) sendTele(`🗑️ Đã xóa truyện #${parts[1]}`, 'info');
-            else sendTele("❌ Số thứ tự sai.", 'error');
+        else if (command === '/f5') location.reload();
+        else if (command === '/stop') { localStorage.setItem('stv_auto_farm', 'false'); sendTele("🛑 STOP", 'info', ()=>location.reload()); }
+        else if (command === '/start') { localStorage.setItem('stv_auto_farm', 'true'); sendTele("✅ START", 'info', ()=>location.reload()); }
+        else if (command === '/swap') { swapToSpecificStory(parseInt(parts[1]) - 1); }
+        else if (command === '/del') { 
+            if(removeStory(parseInt(parts[1]) - 1)) sendTele("🗑️ Đã xóa.", 'info'); 
+            else sendTele("❌ Số sai.", 'error');
         }
-        else if (command === '/sleep') {
-            let mins = parseInt(parts[1]) || 30;
-            activateSleep(mins, "Lệnh thủ công");
-        }
-        else if (command === '/wake') {
-            setSleepUntil(0); localStorage.setItem('stv_auto_farm', 'true');
-            sendTele("☀️ Đã Dậy!", 'info', ()=>location.reload());
-        }
+        else if (command === '/sleep') { activateSleep(parseInt(parts[1])||30, "Lệnh User"); }
+        else if (command === '/wake') { setSleepUntil(0); localStorage.setItem('stv_auto_farm', 'true'); sendTele("☀️ Dậy!", 'info', ()=>location.reload()); }
     }
 
     // --- 4. QUẢN LÝ LIST & LỖI ---
@@ -350,7 +341,7 @@
                     if (res.code == 1) {
                         showToast("⚡ F5...", "#FF9800");
                         setPendingCollect('true'); location.reload(); return;
-                    } else { showToast("😢", "#555"); }
+                    } else { showToast("🌑", "#555"); }
                 } catch(e) {}
                 startCountdown();
             }
