@@ -1,14 +1,46 @@
 # 🌾 STV Auto Farmer - Tool Cày Cuốc Sangtacviet
 
-Script Tampermonkey giúp tự động hóa việc đọc truyện, điểm danh và nhặt vật phẩm (cơ duyên) trên trang Sangtacviet.com. Hỗ trợ báo cáo chi tiết về Telegram.
+Script Tampermonkey mạnh mẽ giúp tự động hóa việc đọc truyện, điểm danh và săn vật phẩm (cơ duyên) trên trang Sangtacviet.com. Tích hợp hệ thống quản lý đa truyện và điều khiển từ xa qua Telegram.
 
-## ✨ Tính năng chính
-- **Tự động lật trang:** Tự động chuyển chương sau khi hết thời gian chờ (ngẫu nhiên 12-15s).
-- **Auto Nhặt Đồ:** Tự động phát hiện và nhặt vật phẩm/cơ duyên.
-- **Bypass UI:** Sử dụng cơ chế gọi hàm trực tiếp (Direct Call) và `unsafeWindow` để đảm bảo hoạt động mượt mà, không phụ thuộc vào việc click nút.
-- **Smart Filter:** Bộ lọc thông minh giúp phân biệt Popup vật phẩm và các Popup rác (như bảng chỉnh Name).
-- **Telegram Report:** Báo cáo ngay lập tức về điện thoại khi nhặt được đồ hoặc gặp lỗi treo máy.
-- **Anti-Stuck:** Tự động F5 khi gặp lỗi tải chương hoặc mất kết nối.
+## ✨ Tính năng nổi bật (v1.0.1 Big Updated 💥)
+
+### 🛠️ Cày Cuốc Tự Động
+- **Auto Lật Trang:** Tự động chuyển chương sau thời gian chờ ngẫu nhiên (12-15s), giả lập hành vi người đọc.
+- **Auto Nhặt Đồ:** Tự động phát hiện cơ duyên, gọi hàm xử lý trực tiếp (Bypass UI) để đảm bảo nhận đồ 100% không cần click chuột.
+- **Smart Filter:** Bộ lọc thông minh giúp phân biệt Popup vật phẩm thật và các Popup rác (như bảng chỉnh Name).
+
+### 📱 Hệ Thống Telegram (Remote Control)
+- **Báo cáo Real-time:** Nhắn tin về điện thoại ngay lập tức khi nhặt được đồ (kèm tên vật phẩm và mô tả).
+- **Điều khiển từ xa:** Chat với Bot để Bật/Tắt, Thêm truyện, Chuyển truyện, F5 trang web mà không cần ngồi máy.**(💥New )**
+- **Anti-Spam:** Cơ chế khóa chéo giúp ngăn chặn việc gửi tin nhắn trùng lặp khi mở nhiều tab. **(💥New )**
+
+### 🔄 Farm Manager (Quản lý Trang Trại) **(💥New )**
+- **Cày Đa Truyện:** Lưu danh sách nhiều truyện. Tự động chuyển sang truyện khác khi hết chương hoặc gặp lỗi.
+- **Anti-Stuck Pro:** Tự động phát hiện lỗi "Server tự khắc phục", "Tải thất bại" để đổi truyện hoặc F5 ngay lập tức.
+- **Chế độ Ngủ Đông:** Tự động cho Bot "đi ngủ" (tạm dừng 30-60p) nếu toàn bộ danh sách truyện đều bị lỗi server, tránh bị Ban IP.
+
+---
+
+## 🕹️ Danh sách Lệnh Telegram (Command)
+
+Sau khi cài đặt, bạn có thể chat với Bot các lệnh sau:
+
+| Lệnh | Chức năng |
+| :--- | :--- |
+| `/help` | Xem danh sách lệnh hướng dẫn. |
+| `/status` | Xem trạng thái hoạt động (Đang chạy/Tắt, Truyện số mấy, Lỗi liên tiếp...). |
+| `/start` | Bật Auto từ xa. |
+| `/stop` | Tắt Auto từ xa. |
+| `/f5` | Ép trình duyệt tải lại trang (Reload). |
+| `/add` | Tự động thêm truyện đang đọc vào danh sách cày. |
+| `/add [link]` | Thêm một link truyện cụ thể vào danh sách. |
+| `/list` | Xem danh sách các truyện đang lưu. |
+| `/swap [số]` | Chuyển ngay lập tức sang truyện số thứ tự X trong list. |
+| `/del [số]` | Xóa truyện số thứ tự X khỏi list. |
+| `/sleep [phút]` | Ra lệnh cho Bot đi ngủ X phút. |
+| `/wake` | Đánh thức Bot dậy cày tiếp ngay lập tức. |
+
+---
 
 ## 🚀 Hướng dẫn cài đặt
 
@@ -16,7 +48,7 @@ Script Tampermonkey giúp tự động hóa việc đọc truyện, điểm danh
 1. Cài đặt tiện ích **Tampermonkey** trên trình duyệt (Chrome, Edge, Firefox...).
 2. [Bấm vào đây để cài đặt Script](https://github.com/Spavvvv/STV_Auto_Farmer/raw/refs/heads/main/src/stv_farmer.user.js)
 
-### Bước 2: Cấu hình Telegram (Bắt buộc để nhận thông báo)
+### Bước 2: Cấu hình Telegram (Bắt buộc để nhận thông báo và ra lệnh cho bot)
 1. Mở Dashboard của Tampermonkey -> Chọn Script vừa cài -> Bấm Sửa (Edit).
 2. Tìm đến dòng đầu tiên của Script:
    ```javascript
@@ -25,6 +57,16 @@ Script Tampermonkey giúp tự động hóa việc đọc truyện, điểm danh
    ```
 3. Điền Token và Chat ID của bạn vào.
 4. Bấm File -> Save (hoặc Ctrl+S).
+
+### Bước 3: Cấp quyền kết nối
+1. Vào trang đọc truyện bất kỳ trên Sangtacviet.
+2. Tampermonkey sẽ hiện thông báo hỏi quyền kết nối đến api.telegram.org.
+   
+**QUAN TRỌNG:** Hãy chọn "Always Allow" (Luôn cho phép) để script có thể gửi tin nhắn và nhận lệnh.
+
+### Customization
+- Bạn có thể thay đổi thời gian chờ bot lắng nghe lệnh từ telegram (Default: 5s) xuống tùy ý
+- Các lệnh có thể được customize tùy theo sở thích
 
 ## ⚠️ MIỄN TRỪ TRÁCH NHIỆM (DISCLAIMER)
 VUI LÒNG ĐỌC KỸ TRƯỚC KHI SỬ DỤNG:
@@ -38,7 +80,4 @@ VUI LÒNG ĐỌC KỸ TRƯỚC KHI SỬ DỤNG:
 ## 📞 Liên hệ & Gỡ bỏ (DMCA/Contact)
 - Nếu bạn là Quản trị viên của Sangtacviet hoặc chủ sở hữu bản quyền và muốn gỡ bỏ repository này, vui lòng liên hệ qua:
 - **Issues:** Tạo một Issue trong repository này.
-- **Hoặc đơn giản hơn**: Admin web fix code hiện tại là được.
-
-- Tôi sẽ tiến hành gỡ bỏ hoặc điều chỉnh mã nguồn ngay lập tức khi nhận được yêu cầu.
-⭐ Nếu thấy tool hữu ích, hãy tặng mình 1 Star nhé! ⭐
+### ⭐ Nếu thấy tool hữu ích, hãy tặng mình 1 Star nhé! ⭐
