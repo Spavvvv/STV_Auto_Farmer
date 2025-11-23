@@ -26,12 +26,34 @@
     };
     const win = unsafeWindow;
 
-    //Lấy truyện gốc từ URL(hotfix v1.1.1)
+    //  Lấy truyện gốc từ URL(hotfix v1.1.1)
     function getStoryRoot(url) {
         // Tìm đoạn: https://sangtacviet.com/truyen/nguon/loai/id_truyen/
         let match = url.match(/(https:\/\/sangtacviet\.com\/truyen\/[^\/]+\/\d+\/\d+)/);
         if (match) return match[1] + '/';
         return url; // Không khớp thì trả về nguyên bản
+    }
+
+    // --- Cập nhật tiến độ (hotfix v.1.1.2) ---
+    function updateCurrentChapterToStorage() {
+        let list = getStoryList();
+        let currentUrl = location.href;
+        let currentRoot = getStoryRoot(currentUrl); // Lấy gốc truyện hiện tại
+
+        for (let i = 0; i < list.length; i++) {
+            // So sánh gốc: Nếu gốc giống nhau -> Cùng 1 truyện
+            if (getStoryRoot(list[i]) === currentRoot) {
+                // Cập nhật link trong list thành chương hiện tại
+                if (list[i] !== currentUrl) {
+                    list[i] = currentUrl;
+                    saveStoryList(list);
+                    console.log("🔖 Đã cập nhật Bookmark:", currentUrl);
+                }
+                // Đồng bộ luôn cái index đang đọc
+                setCurrentStoryIndex(i);
+                return;
+            }
+        }
     }
 
     // 2. QUẢN LÝ DỮ LIỆU & TRẠNG THÁI
@@ -113,39 +135,44 @@
         let parts = cmd.split(' ');
         let command = parts[0].toLowerCase();
 
-        // --- LỆNH ADD (SỬA: CẮT VỀ LINK GỐC TRƯỚC KHI LƯU) ---
+        // --- LỆNH ADD (SỬA: LƯU LINK FULL, NHƯNG CHECK TRÙNG BẰNG ROOT) (hotfix v.1.1.2) ---
         if (command === '/add') {
             let urlToAdd = parts[1];
-            // Nếu gõ /add trống -> Lấy link hiện tại
             if (!urlToAdd) {
                 if (location.href.includes("sangtacviet.com/truyen/")) urlToAdd = location.href;
-                else { sendTele("❌ Bạn đang không ở trang đọc truyện.", 'error'); return; }
+                else { sendTele("❌ Lỗi link.", 'error'); return; }
             }
 
             if (urlToAdd && urlToAdd.includes('sangtacviet.com')) {
-                let rootUrl = getStoryRoot(urlToAdd); // <--- QUAN TRỌNG: Cắt về gốc
-                if (addStory(rootUrl)) sendTele(`✅ Đã thêm Truyện:\n${rootUrl}`, 'info');
-                else sendTele("⚠️ Truyện đã có trong list.", 'info');
+                let list = getStoryList();
+                let rootNew = getStoryRoot(urlToAdd);
+                
+                // Kiểm tra xem truyện này (gốc này) đã có trong list chưa
+                let exists = list.some(savedUrl => getStoryRoot(savedUrl) === rootNew);
+
+                if (!exists) {
+                    addStory(urlToAdd); // LƯU LINK FULL (Để nhớ chương)
+                    sendTele(`✅ Đã thêm truyện vào list.`, 'info');
+                } else {
+                    sendTele("⚠️ Truyện này đã có rồi.", 'info');
+                }
             } else {
-                sendTele("❌ Link không hợp lệ.", 'error');
+                sendTele("❌ Link sai.", 'error');
             }
         }
         
-        // --- LỆNH STATUS (SỬA: SO SÁNH CHỨA LINK GỐC) ---
+        // --- LỆNH STATUS (SỬA: SO SÁNH BẰNG ROOT) (hotfix v.1.1.2)---
         else if (command === '/status') {
             let st = isAutoRunning() ? "ON 🟢" : "OFF 🔴";
             let list = getStoryList();
-            let currentUrl = location.href;
+            let currentRoot = getStoryRoot(location.href);
             
-            // Tìm xem link hiện tại có CHỨA link gốc nào trong list không
-            let listIndex = list.findIndex(rootLink => currentUrl.includes(rootLink));
+            // Tìm vị trí dựa trên Gốc Truyện
+            let listIndex = list.findIndex(savedUrl => getStoryRoot(savedUrl) === currentRoot);
             
             let statusStr = "";
-            if (list.length === 0) statusStr = "0/0 (List trống)";
-            else if (listIndex !== -1) {
-                statusStr = `${listIndex + 1}/${list.length}`;
-                setCurrentStoryIndex(listIndex); // Cập nhật lại vị trí cho chuẩn
-            }
+            if (list.length === 0) statusStr = "0/0 (Trống)";
+            else if (listIndex !== -1) statusStr = `${listIndex + 1}/${list.length}`;
             else statusStr = "Ngoại lai (Chưa lưu)";
 
             sendTele(`📊 <b>STATUS:</b> ${st}\nTruyện: ${statusStr}\nLỗi liên tiếp: ${getErrorStreak()}`, 'info');
@@ -404,6 +431,10 @@
         if (checkSleepMode()) return;
         createControlPanel();
         startVisualMonitor();
+        
+        // Nhớ chương mỗi khi load(hotfix v1.1.2)
+        updateCurrentChapterToStorage
+
         //Default listen time for remote commands: 5s
         setInterval(checkRemoteCommands, 5000);
     });
