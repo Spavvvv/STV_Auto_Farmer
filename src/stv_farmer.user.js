@@ -286,23 +286,76 @@
         return false;
     }
 
+    //Click manual if it doesn't load automatically
+    function tryClickManualLoad() {
+        // Tìm các thẻ có khả năng chứa dòng chữ đó
+        let candidates = document.querySelectorAll('div, span, a, p, b, i');
+        for (let el of candidates) {
+            // Chỉ check những thẻ đang hiển thị
+            if (el.offsetParent === null) continue;
+
+            let text = el.innerText.toLowerCase();
+            if (text.includes("nhấp vào để tải") || text.includes("bấm để tải") || text.includes("click để tải")) {
+                console.log("STV: Phát hiện nút tải thủ công -> Click!");
+                showToast("🖱️ Kích hoạt tải chương...", "#2196F3");
+                el.click();
+                return true;
+            }
+        }
+        return false;
+    }
+    
     function startVisualMonitor() {
         if (!isAutoRunning()) return;
+
+        // Check Mục lục -> Hết truyện
         if (location.href.endsWith('/0/') || location.href.includes('/0/')) {
-            resetErrorStreak(); swapToNextStory("Hết chương"); return;
+            resetErrorStreak();
+            swapToNextStory("Hết chương (Về mục lục)");
+            return;
         }
-        showToast("👁️...", "#999");
+
+        showToast("👁️ Đang giám sát...", "#999");
+        
         let monitor = setInterval(() => {
             let bodyText = document.body.innerText || "";
-            if (bodyText.includes("tự khắc phục") || bodyText.includes("không cần báo lỗi")) {
-                clearInterval(monitor); handleStoryError("Lỗi Text"); return;
-            }
-            if (bodyText.includes("Tải chương thất bại")) { clearInterval(monitor); location.reload(); return; }
-            if (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading")) return;
 
+            // 1. Check lỗi Server (để Swap)
+            if (bodyText.includes("tự khắc phục") || bodyText.includes("không cần báo lỗi")) {
+                clearInterval(monitor);
+                handleStoryError("Lỗi Server (Text)");
+                return;
+            }
+
+            // 2. Check lỗi Tải thất bại (để F5)
+            if (bodyText.includes("Tải chương thất bại")) {
+                clearInterval(monitor); 
+                location.reload(); 
+                return;
+            }
+
+            // 3. [MỚI] Check xem có phải bấm tay để tải không?
+            if (bodyText.includes("nhấp vào để tải") || bodyText.includes("bấm để tải")) {
+                // Gọi hàm click ngay
+                tryClickManualLoad();
+                // Không return, để vòng lặp tiếp tục check xem tải xong chưa
+            }
+
+            // 4. Check đang loading
+            if (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading")) {
+                // Vẫn đang xoay -> Đợi tiếp
+                return; 
+            }
+
+            // 5. Check Tải Xong (Có nội dung hoặc nút Next)
             let hasContent = bodyText.length > 500; 
             let hasNextBtn = document.querySelector('.fa-arrow-right') || Array.from(document.querySelectorAll('a')).some(a => a.innerText.includes("Chương sau"));
-            if (hasContent || hasNextBtn) { clearInterval(monitor); resetErrorStreak(); runFarmingLogic(); }
+
+            if (hasContent || hasNextBtn) {
+                clearInterval(monitor);
+                resetErrorStreak(); 
+                runFarmingLogic(); // Vào việc
+            }
         }, 500);
     }
 
