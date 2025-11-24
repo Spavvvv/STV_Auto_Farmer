@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         STV Auto Farmer
 // @namespace    http://tampermonkey.net/
-// @version      v1.1.2
+// @version      v1.1.3
 // @description  Big Update.. Đọc readme.md để biết cách sử dụng!
 // @author       Gemini v3.0 + Soap
 // @match        https://sangtacviet.com/truyen/*
@@ -304,7 +304,7 @@
         }
         return false;
     }
-    
+
     function startVisualMonitor() {
         if (!isAutoRunning()) return;
 
