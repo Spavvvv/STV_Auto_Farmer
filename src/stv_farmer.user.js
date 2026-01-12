@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         STV Auto Farmer
 // @namespace    http://tampermonkey.net/
-// @version      v1.1.3
-// @description  Big Update.. Đọc readme.md để biết cách sử dụng!
-// @author       Gemini v3.0 + Soap
+// @version      v1.2.0
+// @description  Fix monitor freeze + pending stuck + xhr fail fallback + app/com root + no stacked countdown + pending TTL + safer next
+// @author       Gemini v3.0 Pro + ChatGPT 5.2 + Soap
 // @match        https://sangtacviet.com/truyen/*
-// @icon         https://sangtacviet.com/favicon.ico
+// @match        https://sangtacviet.app/truyen/*
+// @icon         https://sangtacviet.app/favicon.ico
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
@@ -22,34 +23,62 @@
     const CONFIG = {
         minWait: 12000,
         maxWait: 15000,
-        sleepTimeOnError: 45
+        sleepTimeOnError: 1,
+
+        // NEW: pending TTL để chống kẹt/multi-tab
+        pendingTTLms: 20000, // 20s là đủ cho 1 vòng reload+spawn nút
     };
+
     const win = unsafeWindow;
 
-    //  Lấy truyện gốc từ URL(hotfix v1.1.1)
-    function getStoryRoot(url) {
-        // Tìm đoạn: https://sangtacviet.com/truyen/nguon/loai/id_truyen/
-        let match = url.match(/(https:\/\/sangtacviet\.com\/truyen\/[^\/]+\/\d+\/\d+)/);
-        if (match) return match[1] + '/';
-        return url; // Không khớp thì trả về nguyên bản
+    // ---------- Helpers (NEW) ----------
+    function now() { return Date.now(); }
+
+    // NEW: pending theo TTL để tránh kẹt/multi-tab
+    function setPendingCollect(status) {
+        localStorage.setItem('stv_pending_collect', status ? 'true' : 'false');
+        if (status) {
+            localStorage.setItem('stv_pending_collect_until', String(now() + CONFIG.pendingTTLms));
+        } else {
+            localStorage.setItem('stv_pending_collect_until', '0');
+        }
     }
 
-    // --- Cập nhật tiến độ (hotfix v.1.1.2) ---
+    function isPendingCollect() {
+        const flag = localStorage.getItem('stv_pending_collect') === 'true';
+        if (!flag) return false;
+
+        const until = parseInt(localStorage.getItem('stv_pending_collect_until') || '0');
+        if (until > 0 && now() > until) {
+            // hết hạn -> auto clear để không kẹt vĩnh viễn
+            localStorage.setItem('stv_pending_collect', 'false');
+            localStorage.setItem('stv_pending_collect_until', '0');
+            return false;
+        }
+        return true;
+    }
+
+    //  Lấy truyện gốc từ URL (FIX: support .com + .app)
+    function getStoryRoot(url) {
+        // dạng: https://sangtacviet.(com|app)/truyen/nguon/loai/id_truyen/...
+        let match = url.match(/(https:\/\/sangtacviet\.(?:com|app)\/truyen\/[^\/]+\/\d+\/\d+)/);
+        if (match) return match[1] + '/';
+        return url;
+    }
+
+    // --- Cập nhật tiến độ ---
     function updateCurrentChapterToStorage() {
         let list = getStoryList();
         let currentUrl = location.href;
-        let currentRoot = getStoryRoot(currentUrl); // Lấy gốc truyện hiện tại
+        let currentRoot = getStoryRoot(currentUrl);
 
         for (let i = 0; i < list.length; i++) {
-            // So sánh gốc: Nếu gốc giống nhau -> Cùng 1 truyện
             if (getStoryRoot(list[i]) === currentRoot) {
-                // Cập nhật link trong list thành chương hiện tại
                 if (list[i] !== currentUrl) {
                     list[i] = currentUrl;
                     saveStoryList(list);
                     console.log("🔖 Đã cập nhật Bookmark:", currentUrl);
                 }
-                // Đồng bộ luôn cái index đang đọc
                 setCurrentStoryIndex(i);
                 return;
             }
@@ -59,22 +88,20 @@
     // 2. QUẢN LÝ DỮ LIỆU & TRẠNG THÁI
     function getStoryList() { return JSON.parse(localStorage.getItem('stv_story_list') || '[]'); }
     function saveStoryList(list) { localStorage.setItem('stv_story_list', JSON.stringify(list)); }
-    
+
     function getCurrentStoryIndex() { return parseInt(localStorage.getItem('stv_current_story_index') || '0'); }
     function setCurrentStoryIndex(index) { localStorage.setItem('stv_current_story_index', index); }
 
     function isAutoRunning() { return localStorage.getItem('stv_auto_farm') === 'true'; }
-    function isPendingCollect() { return localStorage.getItem('stv_pending_collect') === 'true'; }
-    function setPendingCollect(status) { localStorage.setItem('stv_pending_collect', status); }
 
     function getErrorStreak() { return parseInt(localStorage.getItem('stv_error_streak') || '0'); }
     function increaseErrorStreak() { localStorage.setItem('stv_error_streak', getErrorStreak() + 1); }
     function resetErrorStreak() { localStorage.setItem('stv_error_streak', '0'); }
-    
+
     function getSleepUntil() { return parseInt(localStorage.getItem('stv_sleep_until') || '0'); }
     function setSleepUntil(timestamp) { localStorage.setItem('stv_sleep_until', timestamp); }
 
-    // 3. HỆ THỐNG TELEGRAM (ANTI-SPAM + SMART COMMANDS)
+    // 3. HỆ THỐNG TELEGRAM
     function sendTele(msg, type = 'info', callback = null) {
         if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || TELEGRAM_TOKEN.includes('ĐIỀN_')) {
             if(callback) callback(); return;
@@ -97,9 +124,7 @@
     function checkRemoteCommands() {
         if (!TELEGRAM_TOKEN) return;
 
-        // Random Delay (0-2s) để các Tab không check cùng lúc
         setTimeout(() => {
-            // Lấy ID tin nhắn cuối cùng ĐÃ ĐƯỢC XỬ LÝ bởi bất kỳ tab nào
             let lastProcessedId = parseInt(localStorage.getItem('stv_last_processed_id') || '0');
 
             GM_xmlhttpRequest({
@@ -112,11 +137,9 @@
                             let update = res.result[0];
                             let updateId = update.update_id;
 
-                            // Check lại lần nữa (Double Check Lock)
                             let currentProcessedId = parseInt(localStorage.getItem('stv_last_processed_id') || '0');
-                            if (updateId <= currentProcessedId) return; // Đã có tab khác xử lý rồi -> Bỏ qua
+                            if (updateId <= currentProcessedId) return;
 
-                            // Khóa ngay lập tức
                             localStorage.setItem('stv_last_processed_id', updateId);
 
                             let message = update.message ? update.message.text : "";
@@ -130,28 +153,27 @@
         }, Math.random() * 2000);
     }
 
-    function processCommand(cmd) {          //hotfix v1.1.0
+    function processCommand(cmd) {
         console.log("Cmd:", cmd);
         let parts = cmd.split(' ');
         let command = parts[0].toLowerCase();
 
-        // --- LỆNH ADD (SỬA: LƯU LINK FULL, NHƯNG CHECK TRÙNG BẰNG ROOT) (hotfix v.1.1.2) ---
+        // /add (FIX: accept .com + .app, dedupe bằng root)
         if (command === '/add') {
             let urlToAdd = parts[1];
             if (!urlToAdd) {
-                if (location.href.includes("sangtacviet.com/truyen/")) urlToAdd = location.href;
+                if (location.href.includes("/truyen/")) urlToAdd = location.href;
                 else { sendTele("❌ Lỗi link.", 'error'); return; }
             }
 
-            if (urlToAdd && urlToAdd.includes('sangtacviet.com')) {
+            // FIX: accept both domains
+            if (urlToAdd && (urlToAdd.includes('sangtacviet.com') || urlToAdd.includes('sangtacviet.app'))) {
                 let list = getStoryList();
                 let rootNew = getStoryRoot(urlToAdd);
-                
-                // Kiểm tra xem truyện này (gốc này) đã có trong list chưa
-                let exists = list.some(savedUrl => getStoryRoot(savedUrl) === rootNew);
 
+                let exists = list.some(savedUrl => getStoryRoot(savedUrl) === rootNew);
                 if (!exists) {
-                    addStory(urlToAdd); // LƯU LINK FULL (Để nhớ chương)
+                    addStory(urlToAdd);
                     sendTele(`✅ Đã thêm truyện vào list.`, 'info');
                 } else {
                     sendTele("⚠️ Truyện này đã có rồi.", 'info');
@@ -160,16 +182,13 @@
                 sendTele("❌ Link sai.", 'error');
             }
         }
-        
-        // --- LỆNH STATUS (SỬA: SO SÁNH BẰNG ROOT) (hotfix v.1.1.2)---
+
         else if (command === '/status') {
             let st = isAutoRunning() ? "ON 🟢" : "OFF 🔴";
             let list = getStoryList();
             let currentRoot = getStoryRoot(location.href);
-            
-            // Tìm vị trí dựa trên Gốc Truyện
             let listIndex = list.findIndex(savedUrl => getStoryRoot(savedUrl) === currentRoot);
-            
+
             let statusStr = "";
             if (list.length === 0) statusStr = "0/0 (Trống)";
             else if (listIndex !== -1) statusStr = `${listIndex + 1}/${list.length}`;
@@ -178,21 +197,21 @@
             sendTele(`📊 <b>STATUS:</b> ${st}\nTruyện: ${statusStr}\nLỗi liên tiếp: ${getErrorStreak()}`, 'info');
         }
 
-        // --- LỆNH LIST (SỬA: HIỂN THỊ MŨI TÊN ĐÚNG) ---
+        // /list (FIX: mũi tên so bằng root, không dùng includes)
         else if (command === '/list') {
             let list = getStoryList();
             let currentUrl = location.href;
+            let currentRoot = getStoryRoot(currentUrl);
+
             let msg = "📋 <b>List Truyện:</b>\n";
             list.forEach((l, i) => {
-                // So sánh tương đối
-                let isCurrent = currentUrl.includes(l);
+                let isCurrent = getStoryRoot(l) === currentRoot;
                 msg += `${isCurrent ? '👉 ' : ''}#${i + 1}: ${l}\n`;
             });
             if(list.length===0) msg += "(Trống)";
             sendTele(msg, 'info');
         }
 
-        // --- CÁC LỆNH KHÁC (GIỮ NGUYÊN) ---
         else if (command === '/help') {
             sendTele("📜 <b>MENU:</b>\n/status, /start, /stop, /f5\n/add [link], /list, /del [số], /swap [số]\n/sleep [phút], /wake", 'info');
         }
@@ -200,8 +219,8 @@
         else if (command === '/stop') { localStorage.setItem('stv_auto_farm', 'false'); sendTele("🛑 STOP", 'info', ()=>location.reload()); }
         else if (command === '/start') { localStorage.setItem('stv_auto_farm', 'true'); sendTele("✅ START", 'info', ()=>location.reload()); }
         else if (command === '/swap') { swapToSpecificStory(parseInt(parts[1]) - 1); }
-        else if (command === '/del') { 
-            if(removeStory(parseInt(parts[1]) - 1)) sendTele("🗑️ Đã xóa.", 'info'); 
+        else if (command === '/del') {
+            if(removeStory(parseInt(parts[1]) - 1)) sendTele("🗑️ Đã xóa.", 'info');
             else sendTele("❌ Số sai.", 'error');
         }
         else if (command === '/sleep') { activateSleep(parseInt(parts[1])||30, "Lệnh User"); }
@@ -211,7 +230,6 @@
     // --- 4. QUẢN LÝ LIST & LỖI ---
     function addStory(url) {
         let list = getStoryList();
-        // Check trùng lặp (đơn giản)
         if (list.some(u => u === url)) return false;
         list.push(url); saveStoryList(list); return true;
     }
@@ -239,7 +257,7 @@
         } else { sendTele("❌ Index sai.", 'error'); }
     }
     function activateSleep(minutes, reason) {
-        let wakeTime = Date.now() + (minutes * 60 * 1000);
+        let wakeTime = now() + (minutes * 60 * 1000);
         setSleepUntil(wakeTime); resetErrorStreak();
         let wakeDate = new Date(wakeTime).toLocaleTimeString('vi-VN', {hour: '2-digit', minute:'2-digit'});
         sendTele(`💤 <b>NGỦ (${minutes}p)</b>\nLý do: ${reason}\nDậy: ${wakeDate}`, 'error', ()=>location.reload());
@@ -252,8 +270,11 @@
 
     // --- 5. LOGIC GIAO DIỆN & LỖI ---
     const handleAlert = (msg) => {
-        if (msg && (msg.includes("thất bại") || msg.includes("rescan"))) { location.reload(); return true; }
-        if (msg && (msg.includes("tự khắc phục") || msg.includes("không cần báo lỗi"))) { handleStoryError("Lỗi Server"); return true; }
+        // FIX: chỉ xử lý khi msg là string, tránh crash/match bậy
+        if (typeof msg !== 'string') return false;
+
+        if (msg.includes("thất bại") || msg.includes("rescan")) { location.reload(); return true; }
+        if (msg.includes("tự khắc phục") || msg.includes("không cần báo lỗi")) { handleStoryError("Lỗi Server"); return true; }
         return false;
     };
     const originalAlert = win.alert;
@@ -263,7 +284,7 @@
 
     function checkSleepMode() {
         let sleepUntil = getSleepUntil();
-        if (Date.now() < sleepUntil) {
+        if (now() < sleepUntil) {
             document.body.innerHTML = ""; document.body.style.background = "#222"; document.body.style.color = "#fff";
             document.body.style.display = "flex"; document.body.style.flexDirection = "column";
             document.body.style.justifyContent = "center"; document.body.style.alignItems = "center"; document.body.style.height = "100vh";
@@ -271,9 +292,9 @@
             let h2 = document.createElement("h2"); h2.id = "sleep-timer";
             let p = document.createElement("p"); p.innerText = "Chat /wake để gọi dậy.";
             document.body.appendChild(h1); document.body.appendChild(h2); document.body.appendChild(p);
-            
+
             setInterval(() => {
-                let left = Math.ceil((sleepUntil - Date.now())/1000);
+                let left = Math.ceil((sleepUntil - now())/1000);
                 if(left <= 0) { setSleepUntil(0); location.reload(); }
                 else {
                     let m = Math.floor(left/60); let s = left%60;
@@ -286,19 +307,15 @@
         return false;
     }
 
-    //Click manual if it doesn't load automatically
     function tryClickManualLoad() {
-        // Tìm các thẻ có khả năng chứa dòng chữ đó
-        let candidates = document.querySelectorAll('div, span, a, p, b, i');
+        let candidates = document.querySelectorAll('div, span, a, p, b, i, button');
         for (let el of candidates) {
-            // Chỉ check những thẻ đang hiển thị
-            if (el.offsetParent === null) continue;
-
-            let text = el.innerText.toLowerCase();
+            let text = (el.innerText || "").toLowerCase();
             if (text.includes("nhấp vào để tải") || text.includes("bấm để tải") || text.includes("click để tải")) {
-                console.log("STV: Phát hiện nút tải thủ công -> Click!");
-                showToast("🖱️ Kích hoạt tải chương...", "#2196F3");
+                console.log("STV: Tìm thấy nút tải -> Click!");
+                showToast("🖱️ Auto Click tải lại...", "#2196F3");
                 el.click();
+                if (el.onclick) el.onclick();
                 return true;
             }
         }
@@ -308,58 +325,58 @@
     function startVisualMonitor() {
         if (!isAutoRunning()) return;
 
-        // Check Mục lục -> Hết truyện
         if (location.href.endsWith('/0/') || location.href.includes('/0/')) {
             resetErrorStreak();
             swapToNextStory("Hết chương (Về mục lục)");
             return;
         }
 
-        showToast("👁️ Đang giám sát...", "#999");
-        
+        showToast("👁️", "#999");
+
         let monitor = setInterval(() => {
-            let bodyText = document.body.innerText || "";
+            try {
+                let bodyText = document.body?.innerText || "";
 
-            // 1. Check lỗi Server (để Swap)
-            if (bodyText.includes("tự khắc phục") || bodyText.includes("không cần báo lỗi")) {
-                clearInterval(monitor);
-                handleStoryError("Lỗi Server (Text)");
-                return;
-            }
+                if (bodyText.includes("tự khắc phục") || bodyText.includes("không cần báo lỗi")) {
+                    clearInterval(monitor);
+                    handleStoryError("Lỗi Server (Text)");
+                    return;
+                }
 
-            // 2. Check lỗi Tải thất bại (để F5)
-            if (bodyText.includes("Tải chương thất bại")) {
-                clearInterval(monitor); 
-                location.reload(); 
-                return;
-            }
+                if (bodyText.includes("Tải chương thất bại")) {
+                    clearInterval(monitor);
+                    location.reload();
+                    return;
+                }
 
-            // 3. [MỚI] Check xem có phải bấm tay để tải không?
-            if (bodyText.includes("nhấp vào để tải") || bodyText.includes("bấm để tải")) {
-                // Gọi hàm click ngay
-                tryClickManualLoad();
-                // Không return, để vòng lặp tiếp tục check xem tải xong chưa
-            }
+                if (bodyText.includes("nhấp vào để tải") || bodyText.includes("bấm để tải")) {
+                    tryClickManualLoad();
+                }
 
-            // 4. Check đang loading
-            if (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading")) {
-                // Vẫn đang xoay -> Đợi tiếp
-                return; 
-            }
+                // FIX: tránh kẹt vì chữ "Loading" nằm trong DOM dù trang đã load xong
+                if (bodyText.length < 800 && (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading"))) {
+                    return;
+                }
 
-            // 5. Check Tải Xong (Có nội dung hoặc nút Next)
-            let hasContent = bodyText.length > 500; 
-            let hasNextBtn = document.querySelector('.fa-arrow-right') || Array.from(document.querySelectorAll('a')).some(a => a.innerText.includes("Chương sau"));
+                let hasContent = bodyText.length > 500;
 
-            if (hasContent || hasNextBtn) {
-                clearInterval(monitor);
-                resetErrorStreak(); 
-                runFarmingLogic(); // Vào việc
+                let hasNextBtn =
+                    document.querySelectorAll('.fa-arrow-right').length > 0
+                    || Array.from(document.querySelectorAll('a'))
+                        .some(a => (a.innerText || "").includes("Chương sau"));
+
+                if (hasContent || hasNextBtn) {
+                    clearInterval(monitor);
+                    resetErrorStreak();
+                    runFarmingLogic();
+                }
+            } catch (e) {
+                console.log("STV monitor crash:", e);
             }
         }, 500);
     }
 
-    // --- 6. LOGIC CÀY ĐỒ (DIRECT CALL) ---
+    // --- 6. LOGIC CÀY ĐỒ ---
     function readAndClosePopup() {
         let attempts = 0;
         let reader = setInterval(() => {
@@ -393,60 +410,145 @@
 
     function executeDirectCall() {
         showToast("🚀...", "#FF9800");
+
         if (typeof win.tryCollect === 'function') win.tryCollect(true);
-        setTimeout(() => {
+
+        let start = now();
+        let maxWait = 8000;
+        let tick = 250;
+
+        let timer = setInterval(() => {
+            if (now() - start > maxWait) {
+                clearInterval(timer);
+                showToast("⏱️ timeout", "#f44336");
+                setPendingCollect(false);
+                startCountdown();
+                return;
+            }
+
             let btn = null;
-            let allBtns = document.querySelectorAll('i.btn.btn-info');
-            for(let b of allBtns) if(b.innerText.includes("Nhặt")) { btn = b; break; }
-            if (btn) {
-                let funcName = btn.id; 
+            let allBtns = document.querySelectorAll('i.btn.btn-info, button.btn.btn-info, a.btn.btn-info');
+            for (let b of allBtns) {
+                if ((b.innerText || "").includes("Nhặt")) { btn = b; break; }
+            }
+            if (!btn) return;
+
+            clearInterval(timer);
+
+            try {
+                let funcName = btn.id;
                 if (funcName && typeof win[funcName] === 'function') {
-                    win[funcName](); showToast("✅...", "#4CAF50"); readAndClosePopup();
+                    win[funcName]();
+                } else {
+                    btn.click();
+                    if (btn.onclick) btn.onclick();
                 }
-                setPendingCollect('false');
-            } else { setPendingCollect('false'); }
-        }, 500);
+                showToast("✅...", "#4CAF50");
+                readAndClosePopup();
+            } catch (e) {
+                console.log("executeDirectCall error:", e);
+            } finally {
+                setPendingCollect(false);
+                startCountdown();
+            }
+        }, tick);
     }
 
     function runFarmingLogic() {
         createControlPanel();
-        if (isPendingCollect()) { executeDirectCall(); startCountdown(); return; }
+
+        if (isPendingCollect()) { executeDirectCall(); return; }
+
         let xhr = new XMLHttpRequest();
         xhr.open('POST', '/index.php?ngmar=iscollectable', true);
         xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+        xhr.timeout = 8000;
+
         xhr.onreadystatechange = function() {
-            if (xhr.readyState == 4 && xhr.status == 200) {
-                try {
-                    let res = JSON.parse(xhr.responseText);
-                    if (res.code == 1) {
-                        showToast("⚡ F5...", "#FF9800");
-                        setPendingCollect('true'); location.reload(); return;
-                    } else { showToast("🌑", "#555"); }
-                } catch(e) {}
+            if (xhr.readyState == 4) {
+                if (xhr.status == 200) {
+                    try {
+                        let res = JSON.parse(xhr.responseText);
+                        if (res.code == 1) {
+                            // NOTE: trước đây dùng reload để spawn nút "Nhặt" (phase 2).
+                            // Hiện tại có thể nhặt trực tiếp: gọi tryCollect(true) + gọi function theo id random của nút.
+                            //showToast("⚡ NHẶT...", "#FF9800");
+                            setPendingCollect(true);
+
+                            // Nhặt luôn, không reload nữa
+                            executeDirectCall();
+                            return;
+                        } else {
+                            showToast("😢", "#555");
+                        }
+
+                    } catch(e) {}
+                } else {
+                    console.log("iscollectable status:", xhr.status);
+                }
                 startCountdown();
             }
         };
+
+        xhr.onerror = function() { console.log("iscollectable xhr.onerror"); startCountdown(); };
+        xhr.ontimeout = function() { console.log("iscollectable xhr.timeout"); startCountdown(); };
+
         xhr.send("ngmar=tcollect&sajax=trycollect");
     }
 
+    // FIX: siết điều kiện next để tránh bắt nhầm "tiếp"
     function goToNextChapter() {
         let nextUrl = null;
-        let links = document.querySelectorAll('a');
-        for (let link of links) { if (link.innerText.toLowerCase().includes("chương sau") || link.innerText.toLowerCase().includes("tiếp")) { nextUrl = link.href; break; } }
-        if (!nextUrl) { let icon = document.querySelector('.fa-arrow-right'); if (icon && icon.parentNode.tagName === 'A') nextUrl = icon.parentNode.href; }
+
+        // 1) Ưu tiên link có text đúng "Chương sau"
+        let links = Array.from(document.querySelectorAll('a'));
+        for (let link of links) {
+            let t = (link.innerText || "").trim().toLowerCase();
+            if (t === "chương sau") { nextUrl = link.href; break; }
+        }
+
+        // 2) Fallback icon
+        if (!nextUrl) {
+            let icons = document.querySelectorAll('.fa-arrow-right');
+            if (icons.length > 0) {
+                let icon = icons[0];
+                if (icon && icon.parentNode && icon.parentNode.tagName === 'A') nextUrl = icon.parentNode.href;
+            }
+        }
+
+        // 3) Fallback chặt hơn: chứa "chương sau" (không match "tiếp" nữa)
+        if (!nextUrl) {
+            for (let link of links) {
+                let t = (link.innerText || "").trim().toLowerCase();
+                if (t.includes("chương sau")) { nextUrl = link.href; break; }
+            }
+        }
+
         if (nextUrl) { showToast("🚀", "#2196F3"); location.href = nextUrl; }
         else { swapToNextStory("Không tìm thấy Next"); }
     }
 
+    // FIX: chống countdown chồng
     function startCountdown() {
         if (!isAutoRunning()) return;
+
+        if (window.__stv_countdown) {
+            clearInterval(window.__stv_countdown);
+            window.__stv_countdown = null;
+        }
+
         let time = Math.floor(Math.random() * (CONFIG.maxWait - CONFIG.minWait) + CONFIG.minWait);
         let seconds = Math.floor(time / 1000);
         let btn = document.getElementById('stv-auto-btn');
-        let countdown = setInterval(() => {
+
+        window.__stv_countdown = setInterval(() => {
             if(btn) btn.innerText = `⏳ ${seconds}s`;
             seconds--;
-            if (seconds < 0) { clearInterval(countdown); goToNextChapter(); }
+            if (seconds < 0) {
+                clearInterval(window.__stv_countdown);
+                window.__stv_countdown = null;
+                goToNextChapter();
+            }
         }, 1000);
     }
 
@@ -459,10 +561,10 @@
         testBtn.onclick = function() { sendTele("🔔 OK!", 'info'); };
         let autoBtn = document.createElement('div'); autoBtn.id = 'stv-auto-btn';
         autoBtn.style.cssText = `padding: 10px; border-radius: 8px; font-family: Arial; font-size: 14px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.5);`;
-        if (isAutoRunning()) { autoBtn.innerText = "🤖 ON"; autoBtn.style.background = "#28a745"; autoBtn.style.color = "white"; } 
+        if (isAutoRunning()) { autoBtn.innerText = "🤖 ON"; autoBtn.style.background = "#28a745"; autoBtn.style.color = "white"; }
         else { autoBtn.innerText = "😴 OFF"; autoBtn.style.background = "#333"; autoBtn.style.color = "#bbb"; }
         autoBtn.onclick = function() {
-            let s = !isAutoRunning(); localStorage.setItem('stv_auto_farm', s);
+            let s = !isAutoRunning(); localStorage.setItem('stv_auto_farm', s ? 'true' : 'false');
             sendTele(s?"🤖 ON":"😴 OFF", 'info', ()=>location.reload());
         };
         panel.appendChild(testBtn); panel.appendChild(autoBtn); document.body.appendChild(panel);
@@ -471,11 +573,17 @@
     function showToast(msg, color) {
         if(!document.body) return;
         let c = document.getElementById('stv-toast');
-        if (!c) { c = document.createElement('div'); c.id = 'stv-toast'; c.style.cssText = "position:fixed; bottom:20px; right:20px; z-index:99999; display:flex; flex-direction:column-reverse; gap:5px; pointer-events:none;"; document.body.appendChild(c); }
+        if (!c) {
+            c = document.createElement('div');
+            c.id = 'stv-toast';
+            c.style.cssText = "position:fixed; bottom:20px; right:20px; z-index:99999; display:flex; flex-direction:column-reverse; gap:5px; pointer-events:none;";
+            document.body.appendChild(c);
+        }
         let t = document.createElement('div'); t.innerText = msg;
         t.style.cssText = `background:rgba(0,0,0,0.85); color:#fff; padding:8px 12px; border-radius:5px; border-left:4px solid ${color}; font-family:Arial; font-size:12px; animation:fadeIn 0.3s;`;
         c.appendChild(t); setTimeout(() => t.remove(), 3000);
     }
+
     let css = document.createElement('style');
     css.textContent = "@keyframes fadeIn { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:translateX(0); } }";
     (document.head || document.documentElement).appendChild(css);
@@ -484,11 +592,7 @@
         if (checkSleepMode()) return;
         createControlPanel();
         startVisualMonitor();
-        
-        // Nhớ chương mỗi khi load(hotfix v1.1.2)
-        updateCurrentChapterToStorage
-
-        //Default listen time for remote commands: 5s
-        setInterval(checkRemoteCommands, 5000);
+        updateCurrentChapterToStorage();
+        setInterval(checkRemoteCommands, 2000);
     });
 })();
