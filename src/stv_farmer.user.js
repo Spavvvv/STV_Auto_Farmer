@@ -4,8 +4,8 @@
 // @version      v1.2.0
 // @description  Fix monitor freeze + pending stuck + xhr fail fallback + app/com root + no stacked countdown + pending TTL + safer next
 // @author       Gemini v3.0 Pro + ChatGPT 5.2 + Soap
-// @match        https://sangtacviet.com/truyen/*
-// @match        https://sangtacviet.app/truyen/*
+// @match        *://sangtacviet.com/truyen/*
+// @match        *://sangtacviet.app/truyen/*
 // @icon         https://sangtacviet.app/favicon.ico
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
