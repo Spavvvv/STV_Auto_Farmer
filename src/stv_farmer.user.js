@@ -1,598 +1,725 @@
 // ==UserScript==
-// @name         STV Auto Farmer
+// @name         STV Auto Farmer - Server Error Fix (No False Positive)
 // @namespace    http://tampermonkey.net/
-// @version      v1.2.0
-// @description  Fix monitor freeze + pending stuck + xhr fail fallback + app/com root + no stacked countdown + pending TTL + safer next
-// @author       Gemini v3.0 Pro + ChatGPT 5.2 + Soap
+// @version      v3.8.0
+// @description  Tự động nhặt đồ, cắn đan, đo Vận Khí, fix lỗi bắt nhầm Chương 502/504 làm reload liên tục.
+// @author       Gemini and Soappp
 // @match        *://sangtacviet.com/truyen/*
 // @match        *://sangtacviet.app/truyen/*
-// @icon         https://sangtacviet.app/favicon.ico
 // @run-at       document-start
-// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
-// @connect      api.telegram.org
+// @noframes
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // 1. CẤU HÌNH
-    const TELEGRAM_TOKEN = 'ĐIỀN_TOKEN_CỦA_BẠN_VÀO_ĐÂY';
-    const TELEGRAM_CHAT_ID = 'ĐIỀN_CHAT_ID_CỦA_BẠN_VÀO_ĐÂY';
-
-    const CONFIG = {
-        minWait: 12000,
-        maxWait: 15000,
-        sleepTimeOnError: 1,
-
-        // NEW: pending TTL để chống kẹt/multi-tab
-        pendingTTLms: 20000, // 20s là đủ cho 1 vòng reload+spawn nút
-    };
-
     const win = unsafeWindow;
-
-    // ---------- Helpers (NEW) ----------
-    function now() { return Date.now(); }
-
-    // NEW: pending theo TTL để tránh kẹt/multi-tab
-    function setPendingCollect(status) {
-        localStorage.setItem('stv_pending_collect', status ? 'true' : 'false');
-        if (status) {
-            localStorage.setItem('stv_pending_collect_until', String(now() + CONFIG.pendingTTLms));
-        } else {
-            localStorage.setItem('stv_pending_collect_until', '0');
-        }
-    }
-
-    function isPendingCollect() {
-        const flag = localStorage.getItem('stv_pending_collect') === 'true';
-        if (!flag) return false;
-
-        const until = parseInt(localStorage.getItem('stv_pending_collect_until') || '0');
-        if (until > 0 && now() > until) {
-            // hết hạn -> auto clear để không kẹt vĩnh viễn
-            localStorage.setItem('stv_pending_collect', 'false');
-            localStorage.setItem('stv_pending_collect_until', '0');
-            return false;
-        }
-        return true;
-    }
-
-    //  Lấy truyện gốc từ URL (FIX: support .com + .app)
-    function getStoryRoot(url) {
-        // dạng: https://sangtacviet.(com|app)/truyen/nguon/loai/id_truyen/...
-        let match = url.match(/(https:\/\/sangtacviet\.(?:com|app)\/truyen\/[^\/]+\/\d+\/\d+)/);
-        if (match) return match[1] + '/';
-        return url;
-    }
-
-    // --- Cập nhật tiến độ ---
-    function updateCurrentChapterToStorage() {
-        let list = getStoryList();
-        let currentUrl = location.href;
-        let currentRoot = getStoryRoot(currentUrl);
-
-        for (let i = 0; i < list.length; i++) {
-            if (getStoryRoot(list[i]) === currentRoot) {
-                if (list[i] !== currentUrl) {
-                    list[i] = currentUrl;
-                    saveStoryList(list);
-                    console.log("🔖 Đã cập nhật Bookmark:", currentUrl);
-                }
-                setCurrentStoryIndex(i);
-                return;
-            }
-        }
-    }
-
-    // 2. QUẢN LÝ DỮ LIỆU & TRẠNG THÁI
-    function getStoryList() { return JSON.parse(localStorage.getItem('stv_story_list') || '[]'); }
-    function saveStoryList(list) { localStorage.setItem('stv_story_list', JSON.stringify(list)); }
-
-    function getCurrentStoryIndex() { return parseInt(localStorage.getItem('stv_current_story_index') || '0'); }
-    function setCurrentStoryIndex(index) { localStorage.setItem('stv_current_story_index', index); }
-
-    function isAutoRunning() { return localStorage.getItem('stv_auto_farm') === 'true'; }
-
-    function getErrorStreak() { return parseInt(localStorage.getItem('stv_error_streak') || '0'); }
-    function increaseErrorStreak() { localStorage.setItem('stv_error_streak', getErrorStreak() + 1); }
-    function resetErrorStreak() { localStorage.setItem('stv_error_streak', '0'); }
-
-    function getSleepUntil() { return parseInt(localStorage.getItem('stv_sleep_until') || '0'); }
-    function setSleepUntil(timestamp) { localStorage.setItem('stv_sleep_until', timestamp); }
-
-    // 3. HỆ THỐNG TELEGRAM
-    function sendTele(msg, type = 'info', callback = null) {
-        if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID || TELEGRAM_TOKEN.includes('ĐIỀN_')) {
-            if(callback) callback(); return;
-        }
-        let icon = type === 'success' ? '🎁' : (type === 'error' ? '🚨' : 'ℹ️');
-        let time = new Date().toLocaleTimeString('vi-VN', { hour12: false });
-        let title = document.title.split('-')[0].trim() || "STV";
-        let finalMsg = `${icon} <b>[${time}]</b>\n${msg}\n📖 <i>${title}</i>`;
-
-        GM_xmlhttpRequest({
-            method: "POST",
-            url: `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-            data: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: finalMsg, parse_mode: "HTML", disable_web_page_preview: true }),
-            headers: { "Content-Type": "application/json" },
-            onload: function() { if(callback) callback(); },
-            onerror: function() { if(callback) callback(); }
-        });
-    }
-
-    function checkRemoteCommands() {
-        if (!TELEGRAM_TOKEN) return;
-
-        setTimeout(() => {
-            let lastProcessedId = parseInt(localStorage.getItem('stv_last_processed_id') || '0');
-
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getUpdates?offset=${lastProcessedId + 1}&limit=1`,
-                onload: function(response) {
-                    try {
-                        let res = JSON.parse(response.responseText);
-                        if (res.ok && res.result.length > 0) {
-                            let update = res.result[0];
-                            let updateId = update.update_id;
-
-                            let currentProcessedId = parseInt(localStorage.getItem('stv_last_processed_id') || '0');
-                            if (updateId <= currentProcessedId) return;
-
-                            localStorage.setItem('stv_last_processed_id', updateId);
-
-                            let message = update.message ? update.message.text : "";
-                            if (update.message && update.message.chat.id.toString() === TELEGRAM_CHAT_ID && message) {
-                                processCommand(message.trim());
-                            }
-                        }
-                    } catch (e) {}
-                }
-            });
-        }, Math.random() * 2000);
-    }
-
-    function processCommand(cmd) {
-        console.log("Cmd:", cmd);
-        let parts = cmd.split(' ');
-        let command = parts[0].toLowerCase();
-
-        // /add (FIX: accept .com + .app, dedupe bằng root)
-        if (command === '/add') {
-            let urlToAdd = parts[1];
-            if (!urlToAdd) {
-                if (location.href.includes("/truyen/")) urlToAdd = location.href;
-                else { sendTele("❌ Lỗi link.", 'error'); return; }
-            }
-
-            // FIX: accept both domains
-            if (urlToAdd && (urlToAdd.includes('sangtacviet.com') || urlToAdd.includes('sangtacviet.app'))) {
-                let list = getStoryList();
-                let rootNew = getStoryRoot(urlToAdd);
-
-                let exists = list.some(savedUrl => getStoryRoot(savedUrl) === rootNew);
-                if (!exists) {
-                    addStory(urlToAdd);
-                    sendTele(`✅ Đã thêm truyện vào list.`, 'info');
-                } else {
-                    sendTele("⚠️ Truyện này đã có rồi.", 'info');
-                }
-            } else {
-                sendTele("❌ Link sai.", 'error');
-            }
-        }
-
-        else if (command === '/status') {
-            let st = isAutoRunning() ? "ON 🟢" : "OFF 🔴";
-            let list = getStoryList();
-            let currentRoot = getStoryRoot(location.href);
-            let listIndex = list.findIndex(savedUrl => getStoryRoot(savedUrl) === currentRoot);
-
-            let statusStr = "";
-            if (list.length === 0) statusStr = "0/0 (Trống)";
-            else if (listIndex !== -1) statusStr = `${listIndex + 1}/${list.length}`;
-            else statusStr = "Ngoại lai (Chưa lưu)";
-
-            sendTele(`📊 <b>STATUS:</b> ${st}\nTruyện: ${statusStr}\nLỗi liên tiếp: ${getErrorStreak()}`, 'info');
-        }
-
-        // /list (FIX: mũi tên so bằng root, không dùng includes)
-        else if (command === '/list') {
-            let list = getStoryList();
-            let currentUrl = location.href;
-            let currentRoot = getStoryRoot(currentUrl);
-
-            let msg = "📋 <b>List Truyện:</b>\n";
-            list.forEach((l, i) => {
-                let isCurrent = getStoryRoot(l) === currentRoot;
-                msg += `${isCurrent ? '👉 ' : ''}#${i + 1}: ${l}\n`;
-            });
-            if(list.length===0) msg += "(Trống)";
-            sendTele(msg, 'info');
-        }
-
-        else if (command === '/help') {
-            sendTele("📜 <b>MENU:</b>\n/status, /start, /stop, /f5\n/add [link], /list, /del [số], /swap [số]\n/sleep [phút], /wake", 'info');
-        }
-        else if (command === '/f5') location.reload();
-        else if (command === '/stop') { localStorage.setItem('stv_auto_farm', 'false'); sendTele("🛑 STOP", 'info', ()=>location.reload()); }
-        else if (command === '/start') { localStorage.setItem('stv_auto_farm', 'true'); sendTele("✅ START", 'info', ()=>location.reload()); }
-        else if (command === '/swap') { swapToSpecificStory(parseInt(parts[1]) - 1); }
-        else if (command === '/del') {
-            if(removeStory(parseInt(parts[1]) - 1)) sendTele("🗑️ Đã xóa.", 'info');
-            else sendTele("❌ Số sai.", 'error');
-        }
-        else if (command === '/sleep') { activateSleep(parseInt(parts[1])||30, "Lệnh User"); }
-        else if (command === '/wake') { setSleepUntil(0); localStorage.setItem('stv_auto_farm', 'true'); sendTele("☀️ Dậy!", 'info', ()=>location.reload()); }
-    }
-
-    // --- 4. QUẢN LÝ LIST & LỖI ---
-    function addStory(url) {
-        let list = getStoryList();
-        if (list.some(u => u === url)) return false;
-        list.push(url); saveStoryList(list); return true;
-    }
-    function removeStory(index) {
-        let list = getStoryList();
-        if (index >= 0 && index < list.length) {
-            list.splice(index, 1); saveStoryList(list);
-            if (getCurrentStoryIndex() >= list.length) setCurrentStoryIndex(0);
-            return true;
-        } return false;
-    }
-    function swapToNextStory(reason) {
-        let list = getStoryList();
-        if (list.length === 0) { sendTele(`⚠️ ${reason} -> List trống!`, 'error'); return; }
-        let nextIndex = getCurrentStoryIndex() + 1;
-        if (nextIndex >= list.length) nextIndex = 0;
-        setCurrentStoryIndex(nextIndex);
-        sendTele(`🔄 <b>${reason}</b>\nQua #${nextIndex + 1}`, 'info', ()=> location.href = list[nextIndex]);
-    }
-    function swapToSpecificStory(index) {
-        let list = getStoryList();
-        if (index >= 0 && index < list.length) {
-            setCurrentStoryIndex(index); resetErrorStreak();
-            sendTele(`🔀 Swap #${index + 1}`, 'info', ()=> location.href = list[index]);
-        } else { sendTele("❌ Index sai.", 'error'); }
-    }
-    function activateSleep(minutes, reason) {
-        let wakeTime = now() + (minutes * 60 * 1000);
-        setSleepUntil(wakeTime); resetErrorStreak();
-        let wakeDate = new Date(wakeTime).toLocaleTimeString('vi-VN', {hour: '2-digit', minute:'2-digit'});
-        sendTele(`💤 <b>NGỦ (${minutes}p)</b>\nLý do: ${reason}\nDậy: ${wakeDate}`, 'error', ()=>location.reload());
-    }
-    function handleStoryError(reason) {
-        let list = getStoryList(); increaseErrorStreak(); let streak = getErrorStreak();
-        if (list.length > 0 && streak >= list.length) activateSleep(CONFIG.sleepTimeOnError, "Toàn bộ list lỗi.");
-        else swapToNextStory(`${reason} (Lỗi ${streak})`);
-    }
-
-    // --- 5. LOGIC GIAO DIỆN & LỖI ---
-    const handleAlert = (msg) => {
-        // FIX: chỉ xử lý khi msg là string, tránh crash/match bậy
-        if (typeof msg !== 'string') return false;
-
-        if (msg.includes("thất bại") || msg.includes("rescan")) { location.reload(); return true; }
-        if (msg.includes("tự khắc phục") || msg.includes("không cần báo lỗi")) { handleStoryError("Lỗi Server"); return true; }
-        return false;
+    const CONFIG = {
+        minWait: 15000,
+        maxWait: 20000,
+        pendingTTLms: 20000,
+        reloadDelay: 3000,
+        maxHistoryItems: 500
     };
-    const originalAlert = win.alert;
-    win.alert = function(msg) { if (handleAlert(msg)) return; return originalAlert(msg); };
-    const originalConfirm = win.confirm;
-    win.confirm = function(msg) { if (handleAlert(msg)) return true; return originalConfirm(msg); };
 
-    function checkSleepMode() {
-        let sleepUntil = getSleepUntil();
-        if (now() < sleepUntil) {
-            document.body.innerHTML = ""; document.body.style.background = "#222"; document.body.style.color = "#fff";
-            document.body.style.display = "flex"; document.body.style.flexDirection = "column";
-            document.body.style.justifyContent = "center"; document.body.style.alignItems = "center"; document.body.style.height = "100vh";
-            let h1 = document.createElement("h1"); h1.innerText = "💤 NGỦ ĐÔNG";
-            let h2 = document.createElement("h2"); h2.id = "sleep-timer";
-            let p = document.createElement("p"); p.innerText = "Chat /wake để gọi dậy.";
-            document.body.appendChild(h1); document.body.appendChild(h2); document.body.appendChild(p);
+    // --- OVERRIDE ALERT TRÁNH KẸT LUỒNG ---
+    let lastAlertMsg = "";
+    win.alert = function(msg) {
+        console.log("[STV-Farm Alert Captured]:", msg);
+        lastAlertMsg = String(msg || "");
+    };
 
-            setInterval(() => {
-                let left = Math.ceil((sleepUntil - now())/1000);
-                if(left <= 0) { setSleepUntil(0); location.reload(); }
-                else {
-                    let m = Math.floor(left/60); let s = left%60;
-                    document.getElementById('sleep-timer').innerText = `${m}p ${s}s`;
-                }
-                checkRemoteCommands();
-            }, 2000);
-            return true;
+    const State = {
+        isAuto: () => localStorage.getItem('stv_auto_farm') === 'true',
+        setAuto: (val) => localStorage.setItem('stv_auto_farm', val ? 'true' : 'false'),
+        isPending: () => parseInt(localStorage.getItem('stv_pending_until') || '0') > Date.now(),
+        setPending: (status) => localStorage.setItem('stv_pending_until', status ? String(Date.now() + CONFIG.pendingTTLms) : '0')
+    };
+
+    // --- QUẢN LÝ THỐNG KÊ VÀ LOCALSTORAGE ---
+    const Stats = {
+        getHistory: () => {
+            try { return JSON.parse(localStorage.getItem('stv_history_log') || '[]'); }
+            catch(e) { return []; }
+        },
+        addHistory: (itemName, luckCost = 0) => {
+            let logs = Stats.getHistory();
+            let nowStr = new Date().toLocaleString('vi-VN');
+            logs.unshift({ name: itemName, time: nowStr, cost: luckCost });
+            if (logs.length > CONFIG.maxHistoryItems) logs = logs.slice(0, CONFIG.maxHistoryItems);
+            localStorage.setItem('stv_history_log', JSON.stringify(logs));
+            localStorage.setItem('stv_stats_items', logs.length);
+            return logs.length;
+        },
+        getItemsCount: () => Stats.getHistory().length,
+        getElapsedMs: () => parseInt(localStorage.getItem('stv_stats_elapsed') || '0'),
+        addElapsedMs: (ms) => {
+            let total = Stats.getElapsedMs() + ms;
+            localStorage.setItem('stv_stats_elapsed', total);
+            return total;
+        },
+        getLuck: () => parseInt(localStorage.getItem('stv_user_luck') || '0'),
+        setLuck: (val) => localStorage.setItem('stv_user_luck', val),
+        clearAllStorage: () => {
+            localStorage.removeItem('stv_history_log');
+            localStorage.setItem('stv_stats_items', '0');
+            localStorage.setItem('stv_stats_elapsed', '0');
+            localStorage.removeItem('stv_user_luck');
         }
-        return false;
+    };
+
+    let sessionStartTime = null;
+
+    function clearTimer() {
+        if (win.__stv_timer) { clearTimeout(win.__stv_timer); win.__stv_timer = null; }
+        if (win.__stv_scroll_interval) { clearInterval(win.__stv_scroll_interval); win.__stv_scroll_interval = null; }
+        if (win.__stv_clock_interval) { clearInterval(win.__stv_clock_interval); win.__stv_clock_interval = null; }
     }
 
-    function tryClickManualLoad() {
-        let candidates = document.querySelectorAll('div, span, a, p, b, i, button');
-        for (let el of candidates) {
-            let text = (el.innerText || "").toLowerCase();
-            if (text.includes("nhấp vào để tải") || text.includes("bấm để tải") || text.includes("click để tải")) {
-                console.log("STV: Tìm thấy nút tải -> Click!");
-                showToast("🖱️ Auto Click tải lại...", "#2196F3");
-                el.click();
-                if (el.onclick) el.onclick();
-                return true;
+    // --- CSS GIAO DIỆN ---
+    function injectStyles() {
+        if (document.getElementById('stv-custom-css')) return;
+        const style = document.createElement('style');
+        style.id = 'stv-custom-css';
+        style.innerHTML = `
+            #stv-panel, #stv-toast, #stv-modal-overlay {
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                user-select: none;
             }
-        }
-        return false;
+
+            #stv-panel {
+                position: fixed; bottom: 25px; right: 25px; z-index: 999998;
+                display: flex; align-items: center; gap: 10px; padding: 6px 14px;
+                background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(14px);
+                border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 50px;
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+            }
+
+            #stv-auto-btn {
+                padding: 8px 16px; border-radius: 30px; border: none; cursor: pointer;
+                font-size: 13px; font-weight: 700; color: #ffffff;
+                background: linear-gradient(135deg, #10b981, #059669);
+                box-shadow: 0 4px 12px rgba(16, 185, 129, 0.35); transition: all 0.2s;
+            }
+            #stv-auto-btn.off {
+                background: linear-gradient(135deg, #ef4444, #dc2626);
+                box-shadow: 0 4px 12px rgba(239, 68, 68, 0.35);
+            }
+
+            .stv-stats-box {
+                display: flex; align-items: center; gap: 10px; font-size: 12px;
+                font-weight: 600; color: #e2e8f0; cursor: pointer;
+            }
+            .stv-stat-val { color: #38bdf8; font-weight: 700; font-family: monospace; font-size: 13px; }
+
+            #stv-toast {
+                position: fixed; bottom: 85px; right: 25px; z-index: 999998;
+                width: max-content; min-width: 240px; max-width: 380px; padding: 14px 18px;
+                border-radius: 16px; background: linear-gradient(135deg, rgba(30, 27, 75, 0.95), rgba(49, 46, 129, 0.95));
+                backdrop-filter: blur(16px); border: 1px solid rgba(139, 92, 246, 0.4);
+                box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45); color: #f3f4f6;
+                display: flex; align-items: flex-start; justify-content: space-between;
+                animation: stvSlideUp 0.4s ease-out;
+            }
+            .stv-toast-content { display: flex; flex-direction: column; gap: 4px; word-break: break-word; white-space: pre-wrap; }
+            .stv-toast-title { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #a78bfa; }
+            .stv-toast-item { font-size: 14px; font-weight: 700; color: #ffffff; }
+            .stv-toast-cost { font-size: 12px; font-weight: 600; color: #f43f5e; margin-left: 4px; }
+            .stv-toast-close {
+                background: rgba(255, 255, 255, 0.1); border: none; color: #9ca3af;
+                width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; font-size: 13px;
+                flex-shrink: 0; margin-left: 10px;
+            }
+            .stv-toast-close:hover { background: rgba(239, 68, 68, 0.8); color: #fff; }
+
+            #stv-modal-overlay {
+                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+                background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(8px); z-index: 999999;
+                display: flex; align-items: center; justify-content: center; animation: stvFadeIn 0.2s ease-out;
+            }
+            #stv-modal {
+                width: 90%; max-width: 480px; max-height: 80vh; background: #0f172a;
+                border: 1px solid rgba(255,255,255,0.15); border-radius: 20px;
+                box-shadow: 0 20px 50px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; color: #f8fafc;
+            }
+            .stv-modal-header {
+                padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,0.1);
+                display: flex; align-items: center; justify-content: space-between; background: rgba(30, 41, 59, 0.5);
+            }
+            .stv-modal-title { font-size: 16px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; gap: 8px; }
+            .stv-modal-close { background: transparent; border: none; color: #94a3b8; font-size: 20px; cursor: pointer; }
+            .stv-modal-close:hover { color: #f43f5e; }
+
+            .stv-modal-body { padding: 16px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+            .stv-luck-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+            .stv-luck-card {
+                padding: 12px; border-radius: 12px; background: rgba(30, 41, 59, 0.6);
+                border: 1px solid rgba(255, 255, 255, 0.08); display: flex; flex-direction: column; gap: 4px;
+            }
+            .stv-luck-label { font-size: 11px; color: #94a3b8; font-weight: 600; }
+            .stv-luck-value { font-size: 16px; font-weight: 800; color: #fbbf24; }
+
+            .stv-log-list { display: flex; flex-direction: column; gap: 8px; max-height: 260px; overflow-y: auto; padding-right: 4px; }
+            .stv-log-item {
+                padding: 10px 14px; border-radius: 10px; background: rgba(30, 41, 59, 0.6);
+                border: 1px solid rgba(255,255,255,0.05); display: flex; align-items: center; justify-content: space-between; font-size: 13px;
+            }
+            .stv-log-name { font-weight: 700; color: #f1f5f9; }
+            .stv-log-cost-badge { font-size: 11px; font-weight: 700; color: #f43f5e; background: rgba(244, 63, 94, 0.15); padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+            .stv-log-time { font-size: 11px; color: #64748b; }
+
+            .stv-modal-footer {
+                padding: 14px 20px; border-top: 1px solid rgba(255,255,255,0.1);
+                display: flex; justify-content: space-between; align-items: center; background: rgba(30, 41, 59, 0.3);
+            }
+            .stv-btn-danger {
+                padding: 8px 14px; border-radius: 8px; border: none; background: #dc2626; color: white; font-weight: 600; font-size: 12px; cursor: pointer; transition: background 0.2s;
+            }
+            .stv-btn-danger:hover { background: #b91c1c; }
+
+            @keyframes stvSlideUp { from { opacity: 0; transform: translateY(15px); } to { opacity: 1; transform: translateY(0); } }
+            @keyframes stvFadeIn { from { opacity: 0; } to { opacity: 1; } }
+        `;
+        document.head.appendChild(style);
     }
 
-    function startVisualMonitor() {
-        if (!isAutoRunning()) return;
+    function showItemToast(itemName, luckCost = 0) {
+        let oldToast = document.getElementById('stv-toast');
+        if (oldToast) oldToast.remove();
 
-        if (location.href.endsWith('/0/') || location.href.includes('/0/')) {
-            resetErrorStreak();
-            swapToNextStory("Hết chương (Về mục lục)");
-            return;
-        }
-
-        showToast("👁️", "#999");
-
-        let monitor = setInterval(() => {
-            try {
-                let bodyText = document.body?.innerText || "";
-
-                if (bodyText.includes("tự khắc phục") || bodyText.includes("không cần báo lỗi")) {
-                    clearInterval(monitor);
-                    handleStoryError("Lỗi Server (Text)");
-                    return;
-                }
-
-                if (bodyText.includes("Tải chương thất bại")) {
-                    clearInterval(monitor);
-                    location.reload();
-                    return;
-                }
-
-                if (bodyText.includes("nhấp vào để tải") || bodyText.includes("bấm để tải")) {
-                    tryClickManualLoad();
-                }
-
-                // FIX: tránh kẹt vì chữ "Loading" nằm trong DOM dù trang đã load xong
-                if (bodyText.length < 800 && (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading"))) {
-                    return;
-                }
-
-                let hasContent = bodyText.length > 500;
-
-                let hasNextBtn =
-                    document.querySelectorAll('.fa-arrow-right').length > 0
-                    || Array.from(document.querySelectorAll('a'))
-                        .some(a => (a.innerText || "").includes("Chương sau"));
-
-                if (hasContent || hasNextBtn) {
-                    clearInterval(monitor);
-                    resetErrorStreak();
-                    runFarmingLogic();
-                }
-            } catch (e) {
-                console.log("STV monitor crash:", e);
-            }
-        }, 500);
+        let toast = document.createElement('div');
+        toast.id = 'stv-toast';
+        toast.innerHTML = `
+            <div class="stv-toast-content">
+                <span class="stv-toast-title">✨ Bảo vật vừa nhặt</span>
+                <span class="stv-toast-item">🎁 ${itemName} ${luckCost > 0 ? `<span class="stv-toast-cost">(-${luckCost} Vận khí)</span>` : ''}</span>
+            </div>
+            <button class="stv-toast-close" title="Đóng">✕</button>
+        `;
+        toast.querySelector('.stv-toast-close').onclick = () => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 200);
+        };
+        document.body.appendChild(toast);
     }
 
-    // --- 6. LOGIC CÀY ĐỒ ---
-    function readAndClosePopup() {
-        let attempts = 0;
-        let reader = setInterval(() => {
-            attempts++;
-            let allPopups = document.querySelectorAll('.bootbox-body, .modal-body');
-            let targetPopup = null;
-            for (let popup of allPopups) {
-                if (popup.offsetParent === null) continue;
-                let txt = popup.innerText || "";
-                if (txt.includes("Thêm name") || txt.includes("Tiếng Trung") || txt.includes("Hán Việt")) continue;
-                targetPopup = popup; break;
-            }
-            if (targetPopup) {
-                clearInterval(reader);
-                let itemName = targetPopup.innerText.split('\n')[0].trim();
-                sendTele(`<b>${itemName}</b>\n---\n${targetPopup.innerText}`, 'success', ()=>destroyPopup());
-                return;
-            }
-            if (attempts > 40) { clearInterval(reader); destroyPopup(); }
-        }, 100);
-    }
+    function showStatsModal() {
+        let oldModal = document.getElementById('stv-modal-overlay');
+        if (oldModal) oldModal.remove();
 
-    function destroyPopup() {
-        let buttons = document.querySelectorAll('.bootbox .btn, .modal-footer .btn, button.btn-danger');
-        for (let b of buttons) b.click();
-        setTimeout(() => {
-             document.querySelectorAll('.bootbox, .modal, .modal-backdrop').forEach(e => e.remove());
-             document.body.classList.remove('modal-open');
-        }, 500);
-    }
+        let logs = Stats.getHistory();
+        let luck = Stats.getLuck();
+        let totalCost = logs.reduce((sum, l) => sum + (l.cost || 0), 0);
 
-    function executeDirectCall() {
-        showToast("🚀...", "#FF9800");
+        let overlay = document.createElement('div');
+        overlay.id = 'stv-modal-overlay';
 
-        if (typeof win.tryCollect === 'function') win.tryCollect(true);
+        let logsHtml = logs.length > 0
+            ? logs.map(l => `
+                <div class="stv-log-item">
+                    <div>
+                        <span class="stv-log-name">🎁 ${l.name}</span>
+                        ${l.cost > 0 ? `<span class="stv-log-cost-badge">-${l.cost} Vận khí</span>` : ''}
+                    </div>
+                    <span class="stv-log-time">🕒 ${l.time}</span>
+                </div>
+              `).join('')
+            : `<div style="text-align:center; padding: 20px; color:#64748b; font-size:13px;">Chưa có lịch sử nhặt đồ nào</div>`;
 
-        let start = now();
-        let maxWait = 8000;
-        let tick = 250;
+        overlay.innerHTML = `
+            <div id="stv-modal">
+                <div class="stv-modal-header">
+                    <span class="stv-modal-title">📊 Bảng Thống Kê Auto Farm</span>
+                    <button class="stv-modal-close" id="stv-modal-close-btn">✕</button>
+                </div>
+                <div class="stv-modal-body">
+                    <div class="stv-luck-grid">
+                        <div class="stv-luck-card">
+                            <span class="stv-luck-label">Vận Khí Hiện Tại</span>
+                            <span class="stv-luck-value">🍀 ${luck || 'Chưa rõ'}</span>
+                        </div>
+                        <div class="stv-luck-card">
+                            <span class="stv-luck-label">Tổng Vận Khí Đã Tốn</span>
+                            <span class="stv-luck-value" style="color:#f43f5e;">🔥 -${totalCost}</span>
+                        </div>
+                    </div>
+                    <div style="font-size:13px; font-weight:700; color:#e2e8f0;">Lịch sử nhặt đồ gần đây (${logs.length} món):</div>
+                    <div class="stv-log-list">${logsHtml}</div>
+                </div>
+                <div class="stv-modal-footer">
+                    <button class="stv-btn-danger" id="stv-clear-storage-btn">🗑️ Xóa Sạch Dữ Liệu LocalStorage</button>
+                    <span style="font-size:11px; color:#64748b;">STV Auto Farmer v3.8</span>
+                </div>
+            </div>
+        `;
 
-        let timer = setInterval(() => {
-            if (now() - start > maxWait) {
-                clearInterval(timer);
-                showToast("⏱️ timeout", "#f44336");
-                setPendingCollect(false);
-                startCountdown();
-                return;
-            }
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        document.body.appendChild(overlay);
 
-            let btn = null;
-            let allBtns = document.querySelectorAll('i.btn.btn-info, button.btn.btn-info, a.btn.btn-info');
-            for (let b of allBtns) {
-                if ((b.innerText || "").includes("Nhặt")) { btn = b; break; }
-            }
-            if (!btn) return;
+        document.getElementById('stv-modal-close-btn').onclick = () => overlay.remove();
 
-            clearInterval(timer);
-
-            try {
-                let funcName = btn.id;
-                if (funcName && typeof win[funcName] === 'function') {
-                    win[funcName]();
-                } else {
-                    btn.click();
-                    if (btn.onclick) btn.onclick();
-                }
-                showToast("✅...", "#4CAF50");
-                readAndClosePopup();
-            } catch (e) {
-                console.log("executeDirectCall error:", e);
-            } finally {
-                setPendingCollect(false);
-                startCountdown();
-            }
-        }, tick);
-    }
-
-    function runFarmingLogic() {
-        createControlPanel();
-
-        if (isPendingCollect()) { executeDirectCall(); return; }
-
-        let xhr = new XMLHttpRequest();
-        xhr.open('POST', '/index.php?ngmar=iscollectable', true);
-        xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
-        xhr.timeout = 8000;
-
-        xhr.onreadystatechange = function() {
-            if (xhr.readyState == 4) {
-                if (xhr.status == 200) {
-                    try {
-                        let res = JSON.parse(xhr.responseText);
-                        if (res.code == 1) {
-                            // NOTE: trước đây dùng reload để spawn nút "Nhặt" (phase 2).
-                            // Hiện tại có thể nhặt trực tiếp: gọi tryCollect(true) + gọi function theo id random của nút.
-                            //showToast("⚡ NHẶT...", "#FF9800");
-                            setPendingCollect(true);
-
-                            // Nhặt luôn, không reload nữa
-                            executeDirectCall();
-                            return;
-                        } else {
-                            showToast("😢", "#555");
-                        }
-
-                    } catch(e) {}
-                } else {
-                    console.log("iscollectable status:", xhr.status);
-                }
-                startCountdown();
+        document.getElementById('stv-clear-storage-btn').onclick = () => {
+            if (confirm("⚠️ Bạn có chắc chắn muốn XÓA SẠCH toàn bộ lịch sử nhặt đồ & thời gian tích lũy khỏi LocalStorage?")) {
+                Stats.clearAllStorage();
+                sessionStartTime = Date.now();
+                document.getElementById('stv-time-val').innerText = "00:00:00";
+                document.getElementById('stv-count-val').innerText = "0";
+                overlay.remove();
+                alert("Đã dọn dẹp sạch sẽ bộ nhớ LocalStorage!");
             }
         };
-
-        xhr.onerror = function() { console.log("iscollectable xhr.onerror"); startCountdown(); };
-        xhr.ontimeout = function() { console.log("iscollectable xhr.timeout"); startCountdown(); };
-
-        xhr.send("ngmar=tcollect&sajax=trycollect");
     }
 
-    // FIX: siết điều kiện next để tránh bắt nhầm "tiếp"
-    function goToNextChapter() {
-        let nextUrl = null;
-
-        // 1) Ưu tiên link có text đúng "Chương sau"
-        let links = Array.from(document.querySelectorAll('a'));
-        for (let link of links) {
-            let t = (link.innerText || "").trim().toLowerCase();
-            if (t === "chương sau") { nextUrl = link.href; break; }
-        }
-
-        // 2) Fallback icon
-        if (!nextUrl) {
-            let icons = document.querySelectorAll('.fa-arrow-right');
-            if (icons.length > 0) {
-                let icon = icons[0];
-                if (icon && icon.parentNode && icon.parentNode.tagName === 'A') nextUrl = icon.parentNode.href;
-            }
-        }
-
-        // 3) Fallback chặt hơn: chứa "chương sau" (không match "tiếp" nữa)
-        if (!nextUrl) {
-            for (let link of links) {
-                let t = (link.innerText || "").trim().toLowerCase();
-                if (t.includes("chương sau")) { nextUrl = link.href; break; }
-            }
-        }
-
-        if (nextUrl) { showToast("🚀", "#2196F3"); location.href = nextUrl; }
-        else { swapToNextStory("Không tìm thấy Next"); }
+    // --- ĐỒNG HỒ BẤM GIỜ ---
+    function formatTime(ms) {
+        let totalSecs = Math.floor(ms / 1000);
+        let h = Math.floor(totalSecs / 3600);
+        let m = Math.floor((totalSecs % 3600) / 60);
+        let s = totalSecs % 60;
+        return [h, m, s].map(v => String(v).padStart(2, '0')).join(':');
     }
 
-    // FIX: chống countdown chồng
-    function startCountdown() {
-        if (!isAutoRunning()) return;
+    function startLiveClock() {
+        if (win.__stv_clock_interval) clearInterval(win.__stv_clock_interval);
+        sessionStartTime = Date.now();
 
-        if (window.__stv_countdown) {
-            clearInterval(window.__stv_countdown);
-            window.__stv_countdown = null;
-        }
+        win.__stv_clock_interval = setInterval(() => {
+            if (!State.isAuto()) return;
+            let currentSessionMs = Date.now() - sessionStartTime;
+            let totalMs = Stats.getElapsedMs() + currentSessionMs;
 
-        let time = Math.floor(Math.random() * (CONFIG.maxWait - CONFIG.minWait) + CONFIG.minWait);
-        let seconds = Math.floor(time / 1000);
-        let btn = document.getElementById('stv-auto-btn');
-
-        window.__stv_countdown = setInterval(() => {
-            if(btn) btn.innerText = `⏳ ${seconds}s`;
-            seconds--;
-            if (seconds < 0) {
-                clearInterval(window.__stv_countdown);
-                window.__stv_countdown = null;
-                goToNextChapter();
-            }
+            let clockEl = document.getElementById('stv-time-val');
+            if (clockEl) clockEl.innerText = formatTime(totalMs);
         }, 1000);
     }
 
-    function createControlPanel() {
-        if(document.getElementById('stv-panel')) return;
-        let panel = document.createElement('div'); panel.id = 'stv-panel';
-        panel.style.cssText = `position: fixed; bottom: 80px; right: 20px; z-index: 999999; display: flex; gap: 5px;`;
-        let testBtn = document.createElement('div'); testBtn.innerText = "TEST";
-        testBtn.style.cssText = `padding: 10px; border-radius: 8px; font-family: Arial; font-size: 12px; font-weight: bold; cursor: pointer; background: #2196F3; color: white; box-shadow: 0 4px 8px rgba(0,0,0,0.3);`;
-        testBtn.onclick = function() { sendTele("🔔 OK!", 'info'); };
-        let autoBtn = document.createElement('div'); autoBtn.id = 'stv-auto-btn';
-        autoBtn.style.cssText = `padding: 10px; border-radius: 8px; font-family: Arial; font-size: 14px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.5);`;
-        if (isAutoRunning()) { autoBtn.innerText = "🤖 ON"; autoBtn.style.background = "#28a745"; autoBtn.style.color = "white"; }
-        else { autoBtn.innerText = "😴 OFF"; autoBtn.style.background = "#333"; autoBtn.style.color = "#bbb"; }
-        autoBtn.onclick = function() {
-            let s = !isAutoRunning(); localStorage.setItem('stv_auto_farm', s ? 'true' : 'false');
-            sendTele(s?"🤖 ON":"😴 OFF", 'info', ()=>location.reload());
-        };
-        panel.appendChild(testBtn); panel.appendChild(autoBtn); document.body.appendChild(panel);
-    }
-
-    function showToast(msg, color) {
-        if(!document.body) return;
-        let c = document.getElementById('stv-toast');
-        if (!c) {
-            c = document.createElement('div');
-            c.id = 'stv-toast';
-            c.style.cssText = "position:fixed; bottom:20px; right:20px; z-index:99999; display:flex; flex-direction:column-reverse; gap:5px; pointer-events:none;";
-            document.body.appendChild(c);
+    function saveActiveSessionTime() {
+        if (sessionStartTime) {
+            let ms = Date.now() - sessionStartTime;
+            Stats.addElapsedMs(ms);
+            sessionStartTime = null;
         }
-        let t = document.createElement('div'); t.innerText = msg;
-        t.style.cssText = `background:rgba(0,0,0,0.85); color:#fff; padding:8px 12px; border-radius:5px; border-left:4px solid ${color}; font-family:Arial; font-size:12px; animation:fadeIn 0.3s;`;
-        c.appendChild(t); setTimeout(() => t.remove(), 3000);
     }
 
-    let css = document.createElement('style');
-    css.textContent = "@keyframes fadeIn { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:translateX(0); } }";
-    (document.head || document.documentElement).appendChild(css);
+    // --- TỰ ĐỘNG CUỘN TRANG ---
+    function startAutoScroll(durationMs) {
+        if (!State.isAuto()) return;
+        const scrollStepMs = 100;
+        const totalSteps = durationMs / scrollStepMs;
+        let currentStep = 0;
+
+        win.__stv_scroll_interval = setInterval(() => {
+            if (!State.isAuto()) { clearInterval(win.__stv_scroll_interval); return; }
+            const scrollHeight = Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);
+            const maxScrollTop = scrollHeight - window.innerHeight;
+
+            if (maxScrollTop > 0 && currentStep < totalSteps) {
+                currentStep++;
+                const targetScroll = (currentStep / totalSteps) * maxScrollTop;
+                window.scrollTo({ top: targetScroll, behavior: 'smooth' });
+            } else {
+                clearInterval(win.__stv_scroll_interval);
+            }
+        }, scrollStepMs);
+    }
+
+    // --- CẮN ĐAN TỰ ĐỘNG ---
+    function getBestPillChoice(current, availablePills) {
+        if (current >= 10000 || availablePills.length === 0) return null;
+        let counts = { 400: [], 500: [], 600: [] };
+        availablePills.forEach((p, idx) => { if (counts[p.v]) counts[p.v].push({ idx, id: p.i }); });
+
+        let memo = {};
+        function getMaxResult(curValue, c400, c500, c600) {
+            if (curValue >= 10000 || (c400 === 0 && c500 === 0 && c600 === 0)) return curValue;
+            let key = `${curValue}_${c400}_${c500}_${c600}`;
+            if (memo[key] !== undefined) return memo[key];
+
+            let maxRes = curValue;
+            if (c400 > 0) maxRes = Math.max(maxRes, getMaxResult(curValue + 400, c400 - 1, c500, c600));
+            if (c500 > 0) maxRes = Math.max(maxRes, getMaxResult(curValue + 500, c400, c500 - 1, c600));
+            if (c600 > 0) maxRes = Math.max(maxRes, getMaxResult(curValue + 600, c400, c500, c600 - 1));
+
+            memo[key] = maxRes;
+            return maxRes;
+        }
+
+        let choices = [];
+        if (counts[400].length > 0) choices.push({ pill: counts[400][0], score: getMaxResult(current + 400, counts[400].length - 1, counts[500].length, counts[600].length) });
+        if (counts[500].length > 0) choices.push({ pill: counts[500][0], score: getMaxResult(current + 500, counts[400].length, counts[500].length - 1, counts[600].length) });
+        if (counts[600].length > 0) choices.push({ pill: counts[600][0], score: getMaxResult(current + 600, counts[400].length, counts[500].length, counts[600].length - 1) });
+
+        let optimal = choices.reduce((best, item) => (item.score > best.score ? item : best), { pill: null, score: -1 });
+        return optimal.pill ? availablePills[optimal.pill.idx] : null;
+    }
+
+    function processCultivation(onComplete) {
+        try {
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', '/user/0/', true);
+            xhr.timeout = 5000;
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        const luckMatch = xhr.responseText.match(/<span>Vận khí<\/span>\s*<span>(\d+)<\/span>/);
+                        if (luckMatch) {
+                            Stats.setLuck(parseInt(luckMatch[1]));
+                        }
+
+                        const match = xhr.responseText.match(/(\d+)\s*\/\s*10000/);
+                        if (match && parseInt(match[1]) < 10000) {
+                            fetchAndConsumePills(parseInt(match[1]), onComplete);
+                            return;
+                        }
+                    }
+                    onComplete();
+                }
+            };
+            xhr.onerror = () => onComplete();
+            xhr.ontimeout = () => onComplete();
+            xhr.send();
+        } catch (e) { onComplete(); }
+    }
+
+    function fetchAndConsumePills(currentPoints, onComplete) {
+        const uidMatch = document.cookie.match(/useri2=(\d+)/);
+        const uid = uidMatch ? uidMatch[1] : null;
+        if (!uid) { onComplete(); return; }
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `/io/userinfo/getuseritems?uid=${uid}`, true);
+        xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+        xhr.timeout = 5000;
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4) {
+                if (xhr.status === 200) {
+                    try {
+                        const parser = new DOMParser();
+                        const doc = parser.parseFromString(xhr.responseText, 'text/html');
+                        const items = doc.querySelectorAll('a.item');
+                        let pills = [];
+                        items.forEach(item => {
+                            const id = item.getAttribute('i');
+                            const info = item.querySelector('.iinfo')?.innerHTML || '';
+                            const valMatch = info.match(/<b>(\d+)<\/b>\s*căn cơ/);
+                            if (id && valMatch && [400, 500, 600].includes(parseInt(valMatch[1]))) {
+                                pills.push({ i: id, v: parseInt(valMatch[1]) });
+                            }
+                        });
+                        if (pills.length > 0) {
+                            const bestPill = getBestPillChoice(currentPoints, pills);
+                            if (bestPill) { executeConsumePill(bestPill.i, onComplete); return; }
+                        }
+                    } catch (e) {}
+                }
+                onComplete();
+            }
+        };
+        xhr.onerror = () => onComplete();
+        xhr.ontimeout = () => onComplete();
+        xhr.send();
+    }
+
+    function executeConsumePill(pillId, onComplete) {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/index.php?ngmar=dungnhie', true);
+        xhr.setRequestHeader('Content-type', 'application/x-www-form-urlencoded');
+        xhr.timeout = 5000;
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === 4) {
+                if (xhr.status === 200 && xhr.responseText.trim() === 'success') {
+                    processCultivation(onComplete);
+                } else { onComplete(); }
+            }
+        };
+        xhr.onerror = () => onComplete();
+        xhr.ontimeout = () => onComplete();
+        xhr.send(`ajax=dungnhieu&consume=${pillId}`);
+    }
+
+    // --- XỬ LÝ POPUP BẢO VẬT ---
+    function readAndClosePopup(onSuccess, onFail) {
+        lastAlertMsg = "";
+        let attempts = 0;
+
+        let reader = setInterval(() => {
+            attempts++;
+
+            if (lastAlertMsg.length > 0) {
+                clearInterval(reader);
+                let captured = lastAlertMsg;
+                lastAlertMsg = "";
+
+                if (captured.includes("không tìm thấy") || captured.includes("không nhặt được") || captured.includes("không cánh mà bay")) {
+                    if (onFail) onFail();
+                } else {
+                    if (onSuccess) onSuccess("Bảo vật", 0);
+                }
+                return;
+            }
+
+            let cModal = document.getElementById('cModal');
+            let isCModalVisible = cModal && (cModal.offsetWidth > 0 || cModal.offsetHeight > 0 || cModal.classList.contains('show'));
+
+            if (isCModalVisible) {
+                clearInterval(reader);
+
+                let rawName = document.getElementById('cName')?.innerText?.trim() || "Bảo vật";
+
+                let okBtn = cModal.querySelector('button.btn-danger, .modal-footer .btn');
+                if (okBtn) {
+                    okBtn.click();
+                } else if (typeof win.nMMap2 === 'function') {
+                    try { win.nMMap2(); } catch(e) {}
+                }
+
+                setTimeout(() => {
+                    document.querySelectorAll('.bootbox, .modal, .modal-backdrop').forEach(e => e.remove());
+                    document.body.classList.remove('modal-open');
+
+                    if (lastAlertMsg.includes("không nhặt được") || lastAlertMsg.includes("không cánh mà bay")) {
+                        if (onFail) onFail();
+                    } else {
+                        let oldLuck = Stats.getLuck();
+
+                        fetch('/user/0/').then(r => r.text()).then(html => {
+                            let luckMatch = html.match(/<span>Vận khí<\/span>\s*<span>(\d+)<\/span>/);
+                            let newLuck = luckMatch ? parseInt(luckMatch[1]) : oldLuck;
+                            let luckCost = (oldLuck > 0 && oldLuck > newLuck) ? (oldLuck - newLuck) : 0;
+
+                            Stats.setLuck(newLuck);
+                            let total = Stats.addHistory(rawName, luckCost);
+
+                            let countEl = document.getElementById('stv-count-val');
+                            if (countEl) countEl.innerText = total;
+
+                            if (onSuccess) onSuccess(rawName, luckCost);
+                        }).catch(() => {
+                            let total = Stats.addHistory(rawName, 0);
+                            let countEl = document.getElementById('stv-count-val');
+                            if (countEl) countEl.innerText = total;
+                            if (onSuccess) onSuccess(rawName, 0);
+                        });
+                    }
+                }, 600);
+                return;
+            }
+
+            if (attempts > 30) {
+                clearInterval(reader);
+                if (onFail) onFail();
+            }
+        }, 100);
+    }
+
+    // --- QUÉT VÀ NHẶT ĐỒ GỠ BẪY ---
+    function executeDirectCall() {
+        let attempts = 0;
+        let timer = setInterval(() => {
+            attempts++;
+
+            let btn = document.getElementById('nMMap');
+            if (!btn) {
+                let allBtns = document.querySelectorAll('i.btn.btn-info, button.btn.btn-info, a.btn.btn-info');
+                for (let b of allBtns) {
+                    if ((b.innerText || "").includes("Nhặt")) { btn = b; break; }
+                }
+            }
+
+            if (btn) {
+                clearInterval(timer);
+                try {
+                    btn.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
+                    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                    btn.click();
+                } catch (e) {
+                    console.log(e);
+                }
+
+                readAndClosePopup(
+                    (itemName, luckCost) => {
+                        State.setPending(false);
+                        showItemToast(itemName, luckCost);
+                        startCountdown("🎁 Có bảo vật!");
+                    },
+                    () => {
+                        State.setPending(false);
+                        startCountdown("❌ Nhặt xịt");
+                    }
+                );
+                return;
+            }
+
+            if (attempts >= 12) {
+                clearInterval(timer);
+                State.setPending(false);
+                startCountdown("❌ Không có đồ");
+            }
+        }, 250);
+    }
+
+    // --- ĐẾM NGƯỢC VÀ CHUYỂN CHƯƠNG ---
+    function startCountdown(statusMsg = "❌ Không có đồ") {
+        if (!State.isAuto()) return;
+        clearTimer();
+        startLiveClock();
+
+        let time = Math.floor(Math.random() * (CONFIG.maxWait - CONFIG.minWait) + CONFIG.minWait);
+        let seconds = Math.floor(time / 1000);
+
+        startAutoScroll(time);
+
+        const tick = () => {
+            if (!State.isAuto()) return;
+            const btn = document.getElementById('stv-auto-btn');
+            if (btn) btn.innerText = `${statusMsg} | ⏳ ${seconds}s`;
+            if (seconds <= 0) {
+                saveActiveSessionTime();
+                goToNextChapter();
+            } else {
+                seconds--;
+                win.__stv_timer = setTimeout(tick, 1000);
+            }
+        };
+        tick();
+    }
+
+    // --- RETRY CHUYỂN CHƯƠNG ---
+    let chapterRetryCount = 0;
+    function goToNextChapter() {
+        let currentUrl = window.location.href;
+        let nextUrl = null;
+
+        let navNext = document.getElementById('navnexttop') || document.getElementById('navnextbot');
+        if (navNext && navNext.href && navNext.href !== currentUrl && !navNext.href.endsWith('/0/')) {
+            nextUrl = navNext.href;
+        }
+
+        if (!nextUrl) {
+            let links = Array.from(document.querySelectorAll('a'));
+            for (let link of links) {
+                let t = (link.innerText || "").trim().toLowerCase();
+                if (t === "chương sau" && link.href && link.href !== currentUrl) {
+                    nextUrl = link.href; break;
+                }
+            }
+        }
+
+        if (nextUrl && nextUrl !== currentUrl) {
+            location.href = nextUrl;
+        } else {
+            chapterRetryCount++;
+            console.log(`[STV-Farm] Chưa tìm thấy link chương sau (Lần ${chapterRetryCount}). Chờ thử lại...`);
+            if (chapterRetryCount >= 5) {
+                console.log("[STV-Farm] Reloading...");
+                location.reload();
+            } else {
+                setTimeout(goToNextChapter, 2000);
+            }
+        }
+    }
+
+    function runFarmingLogic() {
+        if (State.isPending()) { executeDirectCall(); return; }
+
+        setTimeout(() => {
+            if (typeof win.tryCollect === 'function') {
+                try { win.tryCollect(true); } catch(e) {}
+            }
+            executeDirectCall();
+        }, 1200);
+    }
+
+    // --- SỬA TRIỆT ĐỂ BẮT NHẦM CỤM "502/504" TỪ TIÊU ĐỀ CHƯƠNG TRUYỆN ---
+    function startVisualMonitor() {
+        if (!State.isAuto()) return;
+        let bodyText = document.body?.innerText || "";
+        let titleText = (document.title || "").trim();
+
+        // CHỈ COI LÀ LỖI SERVER KHI NỘI DUNG RẤT NGẮN (< 500 KÝ TỰ) VÀ TRÙNG CHÍNH XÁC CỤM LỖI NGINX
+        const isNginxError = (bodyText.length < 500) && (
+            titleText === "504 Gateway Time-out" ||
+            titleText === "502 Bad Gateway" ||
+            titleText === "500 Internal Server Error" ||
+            bodyText.includes("504 Gateway Time-out") ||
+            bodyText.includes("502 Bad Gateway") ||
+            bodyText.includes("500 Internal Server Error")
+        );
+
+        if (isNginxError) {
+            console.log("[STV-Farm] Phát hiện lỗi Server Nginx thực sự (504/502). Reloading sau 3s...");
+            const btn = document.getElementById('stv-auto-btn');
+            if (btn) btn.innerText = "⚠️ Lỗi Server 504 | 🔄 Reloading...";
+
+            setTimeout(() => location.reload(), CONFIG.reloadDelay);
+            return;
+        }
+
+        if (bodyText.length < 500 && (bodyText.includes("Đang tải nội dung") || bodyText.includes("Loading"))) {
+            setTimeout(startVisualMonitor, 800); return;
+        }
+
+        if (bodyText.includes('tự khắc phục') || bodyText.includes('Tải chương thất bại')) {
+            setTimeout(() => location.reload(), CONFIG.reloadDelay);
+            return;
+        }
+
+        startLiveClock();
+        processCultivation(() => {
+            runFarmingLogic();
+        });
+    }
+
+    function createUI() {
+        injectStyles();
+        if (document.getElementById('stv-panel')) return;
+
+        let panel = document.createElement('div');
+        panel.id = 'stv-panel';
+
+        let active = State.isAuto();
+
+        panel.innerHTML = `
+            <button id="stv-auto-btn" class="${active ? '' : 'off'}">
+                ${active ? '🔍 Checking...' : '😴 PAUSED'}
+            </button>
+            <div class="stv-stats-box" id="stv-stats-box-trigger" title="Nhấn để mở Bảng Thống Kê">
+                <div class="stv-stat-item">
+                    ⏱️ <span id="stv-time-val" class="stv-stat-val">${formatTime(Stats.getElapsedMs())}</span>
+                </div>
+                <span>|</span>
+                <div class="stv-stat-item">
+                    🎁 <span id="stv-count-val" class="stv-stat-val">${Stats.getItemsCount()}</span>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(panel);
+
+        document.getElementById('stv-stats-box-trigger').onclick = showStatsModal;
+
+        let btn = document.getElementById('stv-auto-btn');
+        btn.onclick = () => {
+            let nextState = !State.isAuto();
+            State.setAuto(nextState);
+
+            if (nextState) {
+                btn.classList.remove('off');
+                btn.innerText = "🔍 Checking...";
+                startVisualMonitor();
+            } else {
+                btn.classList.add('off');
+                btn.innerText = "😴 PAUSED";
+                saveActiveSessionTime();
+                clearTimer();
+            }
+        };
+    }
 
     window.addEventListener('load', () => {
-        if (checkSleepMode()) return;
-        createControlPanel();
-        startVisualMonitor();
-        updateCurrentChapterToStorage();
-        setInterval(checkRemoteCommands, 2000);
+        createUI();
+        if (State.isAuto()) setTimeout(startVisualMonitor, 1000);
     });
 })();
