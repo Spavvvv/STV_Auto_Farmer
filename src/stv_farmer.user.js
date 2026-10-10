@@ -368,7 +368,19 @@
                             Stats.setLuck(parseInt(luckMatch[1]));
                         }
 
-                        const match = xhr.responseText.match(/(\d+)\s*\/\s*10000/);
+                        const doc = new DOMParser().parseFromString(
+                            xhr.responseText, 'text/html'
+                        );
+                        
+                        const statBox = [...doc.querySelectorAll('.stat-box')]
+                            .find(el => el.querySelector('.stat-title')
+                                ?.textContent.trim() === 'Căn cơ');
+                        
+                        const progressText = statBox
+                            ?.querySelector('.progress-bar')
+                            ?.textContent.trim();
+                        
+                        const match = progressText?.match(/^(\d+)\s*\/\s*10000$/);
                         if (match && parseInt(match[1]) < 10000) {
                             fetchAndConsumePills(parseInt(match[1]), onComplete);
                             return;
